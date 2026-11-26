@@ -133,7 +133,7 @@ Build and freeze the shared core, configuration, daemon skeleton, IPC protocol, 
 
 Each task owns a single isolated module file (`src/modules/<name>.rs`) against the frozen Sequence 1 contracts. Reference behavior lives in `../hypr-mocha-dots/bin/`.
 
-- [ ] **2.1 Network (`src/modules/network.rs`)** — *replaces `waybar-network-menu`*
+- [x] **2.1 Network (`src/modules/network.rs`)** — *replaces `waybar-network-menu`*
   - Pure `zbus` client for `org.freedesktop.NetworkManager` (`.Device`, `.Device.Wireless`, `.AccessPoint`, `.Connection.Active`, `.IP4Config`, `.IP6Config`, `.Settings`, `.Settings.Connection`).
   - Global networking toggle (`Enable`) & Wi-Fi radio toggle (`WirelessEnabled`).
   - Ethernet list & actions (connected submenu: Info / Disconnect / Edit; disconnected: auto-connect single profile or picker; unplugged toast).
@@ -144,25 +144,25 @@ Each task owns a single isolated module file (`src/modules/<name>.rs`) against t
   - VPN / WireGuard toggle submenu + `nm-connection-editor` launcher.
   - Connection Info view (Interface, Type, Connection, MAC, IPv4, Gateway, DNS, global IPv6 excluding `fe80::`, Wi-Fi Signal/Bitrate/Security — selecting copies value).
 
-- [ ] **2.2 Bluetooth (`src/modules/bluetooth.rs`)** — *replaces `waybar-bluetooth-menu`*
+- [x] **2.2 Bluetooth (`src/modules/bluetooth.rs`)** — *replaces `waybar-bluetooth-menu`*
   - Pure `zbus` client for `org.bluez` (`ObjectManager::GetManagedObjects`, `Adapter1`, `Device1`, `Battery1`, `AgentManager1` + daemon-registered `NoInputNoOutput` `Agent1`).
   - Native `/dev/rfkill` reader/writer (detect soft/hard block, soft-unblock on power-on).
   - Daemon state cache updated reactively via `InterfacesAdded`, `InterfacesRemoved`, `PropertiesChanged`.
   - `--toggle-power` action + full Fuzzel menu: sorted `(connected desc, paired desc, alias asc)`, device icons (`Icon` property + alias heuristics), `Battery1.Percentage`, filter nameless MAC-only BLE ads during scan.
   - Actions: Connect, Disconnect, Pair + Trust + Connect (new devices), Scan 5s (`StartDiscovery` / `StopDiscovery`), Manage Paired submenu, Device Info (copyable rows), Trust/Untrust, Forget w/ confirm (`RemoveDevice`), Discoverable toggle, Power On/Off.
 
-- [ ] **2.3 Battery & Power Profiles (`src/modules/battery.rs`)** — *replaces `waybar-battery-status` & `waybar-battery-menu`*
+- [x] **2.3 Battery & Power Profiles (`src/modules/battery.rs`)** — *replaces `waybar-battery-status` & `waybar-battery-menu`*
   - Pure `zbus` client for `org.freedesktop.UPower` (`EnumerateDevices`, `DisplayDevice`, `DeviceAdded`, `DeviceRemoved`, `PropertiesChanged`) and `org.freedesktop.UPower.PowerProfiles` (`ActiveProfile`, `Profiles`, `PropertiesChanged`).
   - `battery status` (streaming via daemon `watch` channel, plus `--once`): primary battery (`PowerSupply && IsPresent`, fallback `DisplayDevice`) + peripheral batteries in tooltip (mouse, keyboard, headset, headphones, gamepad, phone, tablet, stylus, speaker).
   - Emits Waybar JSON (`text`, `tooltip`, `percentage`, `class`: `charging`/`plugged`/`warning`/`critical`), formats `TimeToEmpty`/`TimeToFull` cleanly (e.g. `3h 24m`), includes energy rate (W), health (%), active power profile, theme-agnostic Pango tooltip.
   - `battery menu` & `battery profile <name>`: ordered `power-saver`, `balanced`, `performance` with active checkmark; sets `ActiveProfile` over D-Bus and notifies.
 
-- [ ] **2.4 Audio Output & Input (`src/modules/audio.rs`)** — *replaces `waybar-output-menu` & `waybar-input-menu`*
+- [x] **2.4 Audio Output & Input (`src/modules/audio.rs`)** — *replaces `waybar-output-menu` & `waybar-input-menu`*
   - Native `libpulse-binding` client (`pipewire-pulse` / PulseAudio) + `org.freedesktop.systemd1` (`StartUnit("easyeffects.service", "replace")`).
   - **Output (`audio output`, `--toggle-eq`):** list available sinks (exclude `easyeffects_sink` and unavailable ports, always include default sink), device-type icons, switch default sink + move active non-EasyEffects `sink-inputs`. Optional EasyEffects section (when on `PATH`): output preset submenu (`~/.local/share/easyeffects/output` & `~/.config/easyeffects/output`), bypass toggle, start service, open GUI.
   - **Input (`audio input`, `--toggle-fx`):** list available sources (exclude `.monitor`, `monitor_of`, `easyeffects_source`, unavailable ports), switch default source + move active non-EasyEffects `source-outputs` on valid capture sources. Optional EasyEffects section: input preset submenu, mic monitoring toggle, bypass toggle, start service, open GUI.
 
-- [ ] **2.5 External Backlight (`src/modules/backlight.rs`)** — *replaces `waybar-external-backlight`*
+- [x] **2.5 External Backlight (`src/modules/backlight.rs`)** — *replaces `waybar-external-backlight`*
   - Native Linux `/dev/i2c-*` DDC/CI VCP `0x10` (Luminance) get/set with DDC checksum, configurable settle delay (`40ms`) & retries, plus `/sys/class/drm/card*-*` (`status`, `edid`, `ddc/i2c-*`) discovery & EDID fingerprinting (filtering internal `eDP-`, `LVDS-`, `DSI-`).
   - Subscribes to Hyprland `socket2` (`monitoradded` / `monitorremoved`) with 3-attempt 1.5s hotplug retry backoff.
   - Periodic idle OSD sync (default 30s, skipped while pending or within 3s grace window).
@@ -170,24 +170,24 @@ Each task owns a single isolated module file (`src/modules/<name>.rs`) against t
   - `backlight adjust <DELTA>`: updates state & pushes Waybar JSON immediately, debounces (120 ms), writes VCP `0x10` serially on blocking I2C worker.
   - `backlight refresh`: forces re-probe.
 
-- [ ] **2.6 Power Menu (`src/modules/power.rs`)** — *replaces `waybar-power-menu`*
+- [x] **2.6 Power Menu (`src/modules/power.rs`)** — *replaces `waybar-power-menu`*
   - Native `org.freedesktop.login1` (`Manager` & `Session`) + `org.freedesktop.systemd1` + Hyprland IPC.
   - Ordered actions: Lock, Suspend, Hibernate, Logout, Reboot, Shutdown (optional `hide_unavailable` via `CanSuspend`/`CanHibernate`).
   - Confirmation submenu for configured `confirm` actions (`logout`, `reboot`, `shutdown`).
   - Lock calls `login1` `Session.Lock()` if `hypridle.service` is active, else spawns `hyprlock` (or `config.power.lock_cmd`); Logout uses `uwsm stop` if under UWSM else Hyprland `dispatch exit` (or `config.power.logout_cmd`).
 
-- [ ] **2.7 Clipboard (`src/modules/clipboard.rs`)** — *replaces `waybar-clipboard-menu`*
+- [x] **2.7 Clipboard (`src/modules/clipboard.rs`)** — *replaces `waybar-clipboard-menu`*
   - Backed by `cliphist` (`list`, `decode`, `delete`, `wipe`) + `wl-copy` (`--clear` on wipe).
   - Fuzzel menu anchored `top`, width 56, `--no-sort`, `--counter`, custom binds (`Enter` copy, `Shift+Delete` delete & reopen preserving index, `Ctrl+Shift+Delete` confirm clear), distinct icons for text vs. binary/image previews, bottom `Clear history…` row.
   - `--clear` opens confirmation dialog directly.
 
-- [ ] **2.8 Screenshot (`src/modules/screenshot.rs`)** — *replaces `screenshot`*
+- [x] **2.8 Screenshot (`src/modules/screenshot.rs`)** — *replaces `screenshot`*
   - Hyprland IPC socket (`monitors`, `cursorpos`, `clients`, `activewindow`) for monitor detection & visible window geometry boxes (mapped, non-hidden, active/special workspaces).
   - Modes: `menu`, `region`, `window`, `active-window`, `monitor`, `all`; flags `-s/--save`, `--dir`, `--delay`.
   - Capture via `grim -`, selection via `slurp` (managed by `MenuCoordinator`, theme-agnostic configurable colors), copy PNG via `wl-copy --type image/png`, parse PNG IHDR dimensions natively in Rust, write timestamped PNG or `$XDG_RUNTIME_DIR/fuzzyland/screenshot-preview.png`, send thumbnail toast via D-Bus `org.freedesktop.Notifications`.
   - Menu includes live `Save to file: On/Off` toggle and post-Fuzzel fade delay (250 ms monitor/all, 50 ms region/window).
 
-- [ ] **2.9 Media (`src/modules/media.rs`)** — *replaces `hyprlock-media`*
+- [x] **2.9 Media (`src/modules/media.rs`)** — *replaces `hyprlock-media`*
   - Native `org.mpris.MediaPlayer2.*` session D-Bus client (prefers `Playing` over `Paused`, tracking most recently active player in daemon).
   - Actions: `track` (Pango-escaped `title — artist`, UTF-8 char-safe truncation at `max_track_len`, empty when stopped/none), `previous` (`⏮`), `toggle` (`⏸`/`▶`), `next` (`⏭`), plus playback controls (`play-pause`, `prev`, `skip`).
 
