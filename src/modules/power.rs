@@ -1,157 +1,260 @@
-use crate::config::IconsConfig;
+use crate::config::{expand_tilde, IconsConfig, PowerConfig};
 use crate::core::fuzzel::{self, Anchor, FuzzelOptions};
 use crate::core::hyprland;
 use crate::core::notify::{Notification, Urgency};
 use crate::daemon::menu::{MenuKind, MenuSession};
 use crate::daemon::AppContext;
 use anyhow::{Context, Result};
-use std::os::unix::fs::PermissionsExt;
+use serde::Deserialize;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::RwLock;
+use std::time::SystemTime;
 use tokio::process::Command;
 use tracing::{debug, warn};
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
-use zbus::Connection;
 
-const LOGIN1_DEST: &str = "org.freedesktop.login1";
-const LOGIN1_PATH: &str = "/org/freedesktop/login1";
-const LOGIN1_MANAGER_IFACE: &str = "org.freedesktop.login1.Manager";
-const LOGIN1_SESSION_IFACE: &str = "org.freedesktop.login1.Session";
-
-const SYSTEMD1_DEST: &str = "org.freedesktop.systemd1";
-const SYSTEMD1_PATH: &str = "/org/freedesktop/systemd1";
-const SYSTEMD1_MANAGER_IFACE: &str = "org.freedesktop.systemd1.Manager";
-const SYSTEMD1_UNIT_IFACE: &str = "org.freedesktop.systemd1.Unit";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PowerAction {
-    Lock,
-    Suspend,
-    Hibernate,
-    Logout,
-    Reboot,
-    Shutdown,
-}
-
-const ORDERED_ACTIONS: [PowerAction; 6] = [
-    PowerAction::Lock,
-    PowerAction::Suspend,
-    PowerAction::Hibernate,
-    PowerAction::Logout,
-    PowerAction::Reboot,
-    PowerAction::Shutdown,
+const CANONICAL_ORDER: [&str; 6] = [
+    "lock",
+    "suspend",
+    "hibernate",
+    "logout",
+    "reboot",
+    "shutdown",
 ];
 
-impl PowerAction {
-    fn key(self) -> &'static str {
-        match self {
-            Self::Lock => "lock",
-            Self::Suspend => "suspend",
-            Self::Hibernate => "hibernate",
-            Self::Logout => "logout",
-            Self::Reboot => "reboot",
-            Self::Shutdown => "shutdown",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Lock => "Lock",
-            Self::Suspend => "Suspend",
-            Self::Hibernate => "Hibernate",
-            Self::Logout => "Logout",
-            Self::Reboot => "Reboot",
-            Self::Shutdown => "Shutdown",
-        }
-    }
-
-    fn icon(self, icons: &IconsConfig) -> &str {
-        match self {
-            Self::Lock => &icons.power_lock,
-            Self::Suspend => &icons.power_suspend,
-            Self::Hibernate => &icons.power_hibernate,
-            Self::Logout => &icons.power_logout,
-            Self::Reboot => &icons.power_reboot,
-            Self::Shutdown => &icons.power_shutdown,
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerButton {
+    pub label: String,
+    pub text: String,
+    pub action: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PowerAvailability {
-    can_suspend: bool,
-    can_hibernate: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LayoutStamp {
+    path: Option<PathBuf>,
+    mtime: Option<SystemTime>,
+    len: u64,
 }
 
-fn is_login1_available(answer: &str) -> bool {
-    matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "yes" | "challenge"
-    )
+#[derive(Debug, Default)]
+pub struct PowerState {
+    cache: RwLock<Option<(LayoutStamp, Vec<PowerButton>)>>,
 }
 
-fn filter_actions(
-    actions: &[PowerAction],
-    hide_unavailable: bool,
-    availability: PowerAvailability,
-) -> Vec<PowerAction> {
-    actions
-        .iter()
-        .copied()
-        .filter(|action| {
-            if !hide_unavailable {
-                return true;
+impl PowerState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-loads wlogout buttons into live RAM at daemon startup.
+    pub fn warm_load(&self, cfg: &PowerConfig) {
+        let buttons = self.get_buttons(cfg);
+        debug!("Loaded {} wlogout power button(s) into RAM", buttons.len());
+    }
+
+    /// Returns cached wlogout buttons from live RAM, automatically reloading
+    /// if the active layout file was created, removed, or modified on disk.
+    pub fn get_buttons(&self, cfg: &PowerConfig) -> Vec<PowerButton> {
+        let candidates = layout_candidates(cfg);
+        self.get_buttons_from(&candidates)
+    }
+
+    fn get_buttons_from(&self, candidates: &[PathBuf]) -> Vec<PowerButton> {
+        let active_path = candidates.iter().find(|p| p.is_file()).cloned();
+        let stamp = match &active_path {
+            Some(path) => match std::fs::metadata(path) {
+                Ok(meta) => LayoutStamp {
+                    path: Some(path.clone()),
+                    mtime: meta.modified().ok(),
+                    len: meta.len(),
+                },
+                Err(_) => LayoutStamp {
+                    path: Some(path.clone()),
+                    mtime: None,
+                    len: 0,
+                },
+            },
+            None => LayoutStamp {
+                path: None,
+                mtime: None,
+                len: 0,
+            },
+        };
+
+        if let Ok(guard) = self.cache.read() {
+            if let Some((cached_stamp, cached_buttons)) = guard.as_ref() {
+                if *cached_stamp == stamp {
+                    return cached_buttons.clone();
+                }
             }
-            match action {
-                PowerAction::Suspend => availability.can_suspend,
-                PowerAction::Hibernate => availability.can_hibernate,
-                _ => true,
-            }
-        })
-        .collect()
+        }
+
+        let buttons = load_buttons_from_path(active_path.as_deref());
+        if let Ok(mut guard) = self.cache.write() {
+            *guard = Some((stamp, buttons.clone()));
+        }
+        buttons
+    }
 }
 
-fn needs_confirmation(action: PowerAction, confirm_list: &[String]) -> bool {
+#[derive(Debug, Deserialize)]
+struct RawWlogoutEntry {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    action: String,
+}
+
+fn layout_candidates(cfg: &PowerConfig) -> Vec<PathBuf> {
+    if let Some(custom) = cfg.layout_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return vec![expand_tilde(custom)];
+    }
+
+    let mut paths = Vec::with_capacity(2);
+    if let Some(config_dir) = dirs::config_dir() {
+        paths.push(config_dir.join("wlogout").join("layout"));
+    } else if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".config").join("wlogout").join("layout"));
+    }
+    paths.push(PathBuf::from("/etc/wlogout/layout"));
+    paths
+}
+
+fn default_buttons() -> Vec<PowerButton> {
+    vec![
+        PowerButton {
+            label: "lock".to_string(),
+            text: "Lock".to_string(),
+            action: "hyprlock".to_string(),
+        },
+        PowerButton {
+            label: "suspend".to_string(),
+            text: "Suspend".to_string(),
+            action: "systemctl suspend".to_string(),
+        },
+        PowerButton {
+            label: "hibernate".to_string(),
+            text: "Hibernate".to_string(),
+            action: "systemctl hibernate".to_string(),
+        },
+        PowerButton {
+            label: "logout".to_string(),
+            text: "Logout".to_string(),
+            action: "uwsm stop".to_string(),
+        },
+        PowerButton {
+            label: "reboot".to_string(),
+            text: "Reboot".to_string(),
+            action: "systemctl reboot".to_string(),
+        },
+        PowerButton {
+            label: "shutdown".to_string(),
+            text: "Shutdown".to_string(),
+            action: "systemctl poweroff".to_string(),
+        },
+    ]
+}
+
+fn parse_wlogout_layout(raw: &str) -> Vec<PowerButton> {
+    let mut items = Vec::new();
+    let stream = serde_json::Deserializer::from_str(raw).into_iter::<RawWlogoutEntry>();
+    for entry in stream {
+        match entry {
+            Ok(obj) => {
+                let action = obj.action.trim();
+                if action.is_empty() {
+                    continue;
+                }
+                let raw_label = obj.label.trim();
+                let label = raw_label.to_ascii_lowercase();
+                let text = obj
+                    .text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(raw_label)
+                    .to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                items.push(PowerButton {
+                    label,
+                    text,
+                    action: action.to_string(),
+                });
+            }
+            Err(err) => {
+                warn!("Stopped parsing wlogout layout on invalid JSON object: {err}");
+                break;
+            }
+        }
+    }
+
+    items.sort_by_key(|item| {
+        CANONICAL_ORDER
+            .iter()
+            .position(|&name| name == item.label)
+            .unwrap_or(CANONICAL_ORDER.len())
+    });
+
+    items
+}
+
+fn load_buttons_from_path(path: Option<&Path>) -> Vec<PowerButton> {
+    let Some(path) = path else {
+        debug!("No wlogout layout file found; using built-in default power actions");
+        return default_buttons();
+    };
+
+    match std::fs::read_to_string(path) {
+        Ok(raw) => {
+            let parsed = parse_wlogout_layout(&raw);
+            if parsed.is_empty() {
+                warn!(
+                    "wlogout layout {} contained no valid actions; using defaults",
+                    path.display()
+                );
+                default_buttons()
+            } else {
+                debug!("Parsed {} button(s) from {}", parsed.len(), path.display());
+                parsed
+            }
+        }
+        Err(err) => {
+            warn!(
+                "Failed to read wlogout layout {}: {err}; using defaults",
+                path.display()
+            );
+            default_buttons()
+        }
+    }
+}
+
+fn icon_for_label<'a>(label: &str, icons: &'a IconsConfig) -> &'a str {
+    match label {
+        "lock" => &icons.power_lock,
+        "suspend" => &icons.power_suspend,
+        "hibernate" => &icons.power_hibernate,
+        "logout" => &icons.power_logout,
+        "reboot" => &icons.power_reboot,
+        "shutdown" => &icons.power_shutdown,
+        _ => &icons.power_shutdown,
+    }
+}
+
+fn needs_confirmation(label: &str, confirm_list: &[String]) -> bool {
     confirm_list
         .iter()
-        .any(|entry| entry.trim().eq_ignore_ascii_case(action.key()))
+        .any(|entry| entry.trim().eq_ignore_ascii_case(label))
 }
 
-fn non_empty_trimmed(val: Option<&str>) -> Option<&str> {
-    val.map(str::trim).filter(|s| !s.is_empty())
-}
-
-fn has_uwsm_env(xdg_session_desktop: Option<&str>, uwsm_finalize: Option<&str>) -> bool {
-    if non_empty_trimmed(uwsm_finalize).is_some() {
-        return true;
-    }
-    xdg_session_desktop.is_some_and(|v| v.to_ascii_lowercase().contains("uwsm"))
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => meta.is_file() && (meta.permissions().mode() & 0o111 != 0),
-        Err(_) => false,
-    }
-}
-
-fn find_in_path(binary: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(binary);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn spawn_detached(program: &str, args: &[&str]) -> Result<()> {
-    let mut std_cmd = std::process::Command::new(program);
+fn spawn_detached_shell(command: &str) -> Result<()> {
+    let mut std_cmd = std::process::Command::new("/bin/sh");
     std_cmd
-        .args(args)
+        .args(["-c", command])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -168,7 +271,7 @@ fn spawn_detached(program: &str, args: &[&str]) -> Result<()> {
 
     let mut child = Command::from(std_cmd)
         .spawn()
-        .with_context(|| format!("Failed to spawn '{program}'"))?;
+        .with_context(|| format!("Failed to spawn power command '{command}'"))?;
 
     // Reap the detached child asynchronously so the persistent daemon leaves no zombies.
     tokio::spawn(async move {
@@ -178,332 +281,24 @@ fn spawn_detached(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn query_login1_capability(bus: &Connection, method: &str) -> bool {
-    match bus
-        .call_method(
-            Some(LOGIN1_DEST),
-            LOGIN1_PATH,
-            Some(LOGIN1_MANAGER_IFACE),
-            method,
-            &(),
-        )
-        .await
-    {
-        Ok(reply) => match reply.body().deserialize::<String>() {
-            Ok(answer) => {
-                debug!("login1.{method}() => {answer}");
-                is_login1_available(&answer)
-            }
-            Err(err) => {
-                warn!("Failed to deserialize login1.{method}() response: {err}");
-                false
-            }
-        },
-        Err(err) => {
-            warn!("Failed to call login1.{method}(): {err}");
-            false
-        }
-    }
-}
-
-async fn query_availability(ctx: &AppContext) -> PowerAvailability {
-    if !ctx.config.power.hide_unavailable {
-        return PowerAvailability {
-            can_suspend: true,
-            can_hibernate: true,
-        };
-    }
-
-    match ctx.system_bus().await {
-        Ok(bus) => {
-            let (can_suspend, can_hibernate) = tokio::join!(
-                query_login1_capability(bus, "CanSuspend"),
-                query_login1_capability(bus, "CanHibernate"),
-            );
-            PowerAvailability {
-                can_suspend,
-                can_hibernate,
-            }
-        }
-        Err(err) => {
-            warn!("Could not connect to system D-Bus to check power availability: {err}");
-            PowerAvailability {
-                can_suspend: false,
-                can_hibernate: false,
-            }
-        }
-    }
-}
-
-async fn is_user_systemd_unit_active(ctx: &AppContext, unit: &str) -> bool {
-    let Ok(bus) = ctx.session_bus().await else {
-        debug!("Session D-Bus unavailable while checking systemd unit '{unit}'");
-        return false;
-    };
-
-    let Ok(reply) = bus
-        .call_method(
-            Some(SYSTEMD1_DEST),
-            SYSTEMD1_PATH,
-            Some(SYSTEMD1_MANAGER_IFACE),
-            "GetUnit",
-            &(unit,),
-        )
-        .await
-    else {
-        debug!("systemd user unit '{unit}' is not loaded");
-        return false;
-    };
-
-    let Ok(unit_path) = reply.body().deserialize::<OwnedObjectPath>() else {
-        debug!("Failed to deserialize unit path for '{unit}'");
-        return false;
-    };
-
-    let Ok(prop_reply) = bus
-        .call_method(
-            Some(SYSTEMD1_DEST),
-            unit_path.as_str(),
-            Some("org.freedesktop.DBus.Properties"),
-            "Get",
-            &(SYSTEMD1_UNIT_IFACE, "ActiveState"),
-        )
-        .await
-    else {
-        debug!("Failed to query ActiveState for '{unit}'");
-        return false;
-    };
-
-    match prop_reply.body().deserialize::<OwnedValue>() {
-        Ok(val) => match String::try_from(val) {
-            Ok(state) => {
-                debug!("systemd user unit '{unit}' ActiveState={state}");
-                state == "active"
-            }
-            Err(err) => {
-                debug!("Unexpected ActiveState value for '{unit}': {err}");
-                false
-            }
-        },
-        Err(err) => {
-            debug!("Failed to deserialize ActiveState for '{unit}': {err}");
-            false
-        }
-    }
-}
-
-async fn login1_get_session_path(bus: &Connection) -> Result<OwnedObjectPath> {
-    if let Ok(session_id) = std::env::var("XDG_SESSION_ID") {
-        let trimmed = session_id.trim();
-        if !trimmed.is_empty() {
-            match bus
-                .call_method(
-                    Some(LOGIN1_DEST),
-                    LOGIN1_PATH,
-                    Some(LOGIN1_MANAGER_IFACE),
-                    "GetSession",
-                    &(trimmed,),
-                )
-                .await
-            {
-                Ok(reply) => {
-                    return reply
-                        .body()
-                        .deserialize::<OwnedObjectPath>()
-                        .context("Failed to deserialize login1 session path");
-                }
-                Err(err) => {
-                    debug!("login1.Manager.GetSession({trimmed}) failed: {err}");
-                }
-            }
-        }
-    }
-
-    let reply = bus
-        .call_method(
-            Some(LOGIN1_DEST),
-            LOGIN1_PATH,
-            Some(LOGIN1_MANAGER_IFACE),
-            "GetSession",
-            &("auto",),
-        )
-        .await
-        .context("org.freedesktop.login1.Manager.GetSession(\"auto\") failed")?;
-
-    reply
-        .body()
-        .deserialize::<OwnedObjectPath>()
-        .context("Failed to deserialize login1 auto session path")
-}
-
-async fn login1_lock_session(ctx: &AppContext) -> Result<()> {
-    let bus = ctx.system_bus().await?;
-    if let Ok(session_path) = login1_get_session_path(bus).await {
-        match bus
-            .call_method(
-                Some(LOGIN1_DEST),
-                session_path.as_str(),
-                Some(LOGIN1_SESSION_IFACE),
-                "Lock",
-                &(),
-            )
-            .await
-        {
-            Ok(_) => return Ok(()),
-            Err(err) => {
-                debug!(
-                    "login1.Session.Lock() on {} failed: {err}; falling back to LockSessions()",
-                    session_path.as_str()
-                );
-            }
-        }
-    }
-
-    bus.call_method(
-        Some(LOGIN1_DEST),
-        LOGIN1_PATH,
-        Some(LOGIN1_MANAGER_IFACE),
-        "LockSessions",
-        &(),
-    )
-    .await
-    .context("org.freedesktop.login1.Manager.LockSessions() failed")?;
-    Ok(())
-}
-
-async fn login1_terminate_session(ctx: &AppContext) -> Result<()> {
-    let bus = ctx.system_bus().await?;
-    let session_path = login1_get_session_path(bus).await?;
-    bus.call_method(
-        Some(LOGIN1_DEST),
-        session_path.as_str(),
-        Some(LOGIN1_SESSION_IFACE),
-        "Terminate",
-        &(),
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "org.freedesktop.login1.Session.Terminate() failed on {}",
-            session_path.as_str()
-        )
-    })?;
-    Ok(())
-}
-
-async fn login1_power_call(ctx: &AppContext, method: &str) -> Result<()> {
-    let bus = ctx.system_bus().await?;
-    bus.call_method(
-        Some(LOGIN1_DEST),
-        LOGIN1_PATH,
-        Some(LOGIN1_MANAGER_IFACE),
-        method,
-        &(true,),
-    )
-    .await
-    .with_context(|| format!("org.freedesktop.login1.Manager.{method}(true) failed"))?;
-    Ok(())
-}
-
-async fn is_uwsm_active() -> bool {
-    let Some(uwsm_bin) = find_in_path("uwsm") else {
-        return false;
-    };
-
-    let check = tokio::time::timeout(
-        Duration::from_secs(2),
-        Command::new(&uwsm_bin)
-            .args(["check", "is-active"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status(),
-    )
-    .await;
-
-    match check {
-        Ok(Ok(status)) if status.success() => return true,
-        Ok(Ok(_)) => {}
-        Ok(Err(err)) => debug!("Failed to run `uwsm check is-active`: {err}"),
-        Err(_) => debug!("Timed out running `uwsm check is-active`"),
-    }
-
-    let xdg_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
-    let uwsm_finalize = std::env::var("UWSM_FINALIZE_VARNAMES").ok();
-    has_uwsm_env(xdg_desktop.as_deref(), uwsm_finalize.as_deref())
-}
-
-async fn execute_lock(ctx: &AppContext) -> Result<()> {
-    if let Some(cmd) = non_empty_trimmed(ctx.config.power.lock_cmd.as_deref()) {
-        return spawn_detached("/bin/sh", &["-c", cmd]);
-    }
-
-    if is_user_systemd_unit_active(ctx, "hypridle.service").await {
-        login1_lock_session(ctx).await
-    } else {
-        spawn_detached("hyprlock", &[])
-    }
-}
-
-async fn execute_logout(ctx: &AppContext) -> Result<()> {
-    if let Some(cmd) = non_empty_trimmed(ctx.config.power.logout_cmd.as_deref()) {
-        return spawn_detached("/bin/sh", &["-c", cmd]);
-    }
-
-    if is_uwsm_active().await {
-        return spawn_detached("uwsm", &["stop"]);
-    }
-
-    match hyprland::dispatch("exit").await {
-        Ok(_) => Ok(()),
-        Err(hypr_err) => {
-            debug!(
-                "Hyprland `dispatch exit` failed ({hypr_err}); falling back to login1 session terminate"
-            );
-            login1_terminate_session(ctx).await.with_context(|| {
-                format!(
-                    "Hyprland exit failed ({hypr_err}) and login1 session termination also failed"
-                )
-            })
-        }
-    }
-}
-
-async fn execute_action(ctx: &AppContext, action: PowerAction) -> Result<()> {
-    match action {
-        PowerAction::Lock => execute_lock(ctx).await,
-        PowerAction::Suspend => login1_power_call(ctx, "Suspend").await,
-        PowerAction::Hibernate => login1_power_call(ctx, "Hibernate").await,
-        PowerAction::Logout => execute_logout(ctx).await,
-        PowerAction::Reboot => login1_power_call(ctx, "Reboot").await,
-        PowerAction::Shutdown => login1_power_call(ctx, "PowerOff").await,
-    }
-}
-
 pub async fn run_menu(ctx: &AppContext) -> Result<()> {
     let guard = match ctx.menu.begin_session(MenuKind::Power) {
         MenuSession::ToggledOff => return Ok(()),
         MenuSession::Acquired(guard) => guard,
     };
 
-    let (output, availability) =
-        tokio::join!(hyprland::detect_cursor_output(), query_availability(ctx));
-
-    let actions = filter_actions(
-        &ORDERED_ACTIONS,
-        ctx.config.power.hide_unavailable,
-        availability,
-    );
-    if actions.is_empty() {
+    let output = hyprland::detect_cursor_output().await;
+    let buttons = ctx.power.get_buttons(&ctx.config.power);
+    if buttons.is_empty() {
         return Ok(());
     }
 
     let icons = &ctx.config.icons;
-    let entries: Vec<(String, PowerAction)> = actions
+    let entries: Vec<(String, PowerButton)> = buttons
         .into_iter()
-        .map(|action| {
-            let text = format!("{}  {}", action.icon(icons), action.label());
-            (text, action)
+        .map(|btn| {
+            let icon = icon_for_label(&btn.label, icons);
+            (format!("{icon}  {}", btn.text), btn)
         })
         .collect();
 
@@ -520,15 +315,15 @@ pub async fn run_menu(ctx: &AppContext) -> Result<()> {
     let Some(idx) = fuzzel::select(&ctx.config.fuzzel, &guard, &entries, &opts).await? else {
         return Ok(());
     };
-    let action = entries[idx].1;
+    let selected = entries[idx].1.clone();
 
-    if needs_confirmation(action, &ctx.config.power.confirm) {
-        let icon = action.icon(icons);
-        let yes_label = format!("{icon}  Yes, {}", action.label());
+    if needs_confirmation(&selected.label, &ctx.config.power.confirm) {
+        let icon = icon_for_label(&selected.label, icons);
+        let yes_label = format!("{icon}  Yes, {}", selected.text);
         let cancel_label = format!("{}  Cancel", icons.cancel);
         let confirm_opts = FuzzelOptions {
             prompt: format!("{icon}  "),
-            placeholder: Some(format!("Confirm {}...", action.label().to_ascii_lowercase())),
+            placeholder: Some(format!("Confirm {}...", selected.text.to_ascii_lowercase())),
             anchor: Anchor::TopRight,
             width: Some(24),
             output,
@@ -550,9 +345,9 @@ pub async fn run_menu(ctx: &AppContext) -> Result<()> {
 
     drop(guard);
 
-    if let Err(err) = execute_action(ctx, action).await {
-        warn!("Power action '{}' failed: {err:#}", action.label());
-        let notif = Notification::new("Power", format!("{} failed", action.label()))
+    if let Err(err) = spawn_detached_shell(&selected.action) {
+        warn!("Power action '{}' failed: {err:#}", selected.text);
+        let notif = Notification::new("Power", format!("{} failed", selected.text))
             .body(format!("{err}"))
             .urgency(Urgency::Critical);
         ctx.notifier.send_best_effort(&notif).await;
@@ -565,128 +360,118 @@ pub async fn run_menu(ctx: &AppContext) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PowerConfig;
 
     #[test]
-    fn action_order_is_canonical() {
-        let keys: Vec<&str> = ORDERED_ACTIONS.iter().map(|a| a.key()).collect();
-        assert_eq!(
-            keys,
-            vec!["lock", "suspend", "hibernate", "logout", "reboot", "shutdown"]
-        );
+    fn parses_concatenated_wlogout_layout_and_orders_canonically() {
+        let layout = r#"
+{
+    "label" : "shutdown",
+    "action" : "systemctl poweroff",
+    "text" : "Shutdown",
+    "keybind" : "s"
+}
+{
+    "label" : "custom",
+    "action" : "my-custom-cmd",
+    "text" : "Custom Action",
+    "keybind" : "c"
+}
+{
+    "label" : "lock",
+    "action" : "/usr/bin/hyprlock",
+    "text" : "Lock",
+    "keybind" : "l"
+}
+{
+    "label" : "reboot",
+    "action" : "systemctl reboot",
+    "text" : "Reboot",
+    "keybind" : "r"
+}
+"#;
+        let buttons = parse_wlogout_layout(layout);
+        let labels: Vec<&str> = buttons.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(labels, vec!["lock", "reboot", "shutdown", "custom"]);
+        assert_eq!(buttons[0].action, "/usr/bin/hyprlock");
+        assert_eq!(buttons[3].text, "Custom Action");
+        assert_eq!(buttons[3].action, "my-custom-cmd");
+    }
 
-        let labels: Vec<&str> = ORDERED_ACTIONS.iter().map(|a| a.label()).collect();
-        assert_eq!(
-            labels,
-            vec!["Lock", "Suspend", "Hibernate", "Logout", "Reboot", "Shutdown"]
-        );
+    #[test]
+    fn skips_entries_with_missing_action_and_falls_back_text_to_label() {
+        let layout = r#"
+{ "label": "empty", "action": "   ", "text": "Ignored" }
+{ "label": "Suspend", "action": "systemctl suspend" }
+"#;
+        let buttons = parse_wlogout_layout(layout);
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "suspend");
+        assert_eq!(buttons[0].text, "Suspend");
+        assert_eq!(buttons[0].action, "systemctl suspend");
     }
 
     #[test]
     fn confirmation_matching_is_case_insensitive_and_trimmed() {
         let defaults = PowerConfig::default().confirm;
-        assert!(!needs_confirmation(PowerAction::Lock, &defaults));
-        assert!(!needs_confirmation(PowerAction::Suspend, &defaults));
-        assert!(!needs_confirmation(PowerAction::Hibernate, &defaults));
-        assert!(needs_confirmation(PowerAction::Logout, &defaults));
-        assert!(needs_confirmation(PowerAction::Reboot, &defaults));
-        assert!(needs_confirmation(PowerAction::Shutdown, &defaults));
+        assert!(!needs_confirmation("lock", &defaults));
+        assert!(!needs_confirmation("suspend", &defaults));
+        assert!(!needs_confirmation("hibernate", &defaults));
+        assert!(needs_confirmation("logout", &defaults));
+        assert!(needs_confirmation("reboot", &defaults));
+        assert!(needs_confirmation("shutdown", &defaults));
 
-        let custom = vec![
-            "LOCK".to_string(),
-            "  Hibernate ".to_string(),
-            "ShUtDoWn".to_string(),
-        ];
-        assert!(needs_confirmation(PowerAction::Lock, &custom));
-        assert!(needs_confirmation(PowerAction::Hibernate, &custom));
-        assert!(needs_confirmation(PowerAction::Shutdown, &custom));
-        assert!(!needs_confirmation(PowerAction::Suspend, &custom));
-        assert!(!needs_confirmation(PowerAction::Logout, &custom));
-        assert!(!needs_confirmation(PowerAction::Reboot, &custom));
+        let custom = vec!["LOCK".to_string(), "  Custom ".to_string()];
+        assert!(needs_confirmation("lock", &custom));
+        assert!(needs_confirmation("custom", &custom));
+        assert!(!needs_confirmation("shutdown", &custom));
     }
 
     #[test]
-    fn login1_availability_parsing() {
-        assert!(is_login1_available("yes"));
-        assert!(is_login1_available("challenge"));
-        assert!(is_login1_available(" YES "));
-        assert!(is_login1_available("Challenge"));
-        assert!(!is_login1_available("no"));
-        assert!(!is_login1_available("na"));
-        assert!(!is_login1_available(""));
+    fn power_state_caches_in_ram_and_reloads_on_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "fuzzyland-power-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("layout");
+
+        std::fs::write(
+            &file,
+            r#"{ "label": "lock", "action": "hyprlock", "text": "Lock" }"#,
+        )
+        .unwrap();
+
+        let state = PowerState::new();
+        let candidates = vec![file.clone()];
+
+        let first = state.get_buttons_from(&candidates);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].action, "hyprlock");
+
+        // Modify file with different length so stamp changes even within same mtime tick.
+        std::fs::write(
+            &file,
+            r#"{ "label": "lock", "action": "swaylock -f", "text": "Lock Screen" }
+{ "label": "shutdown", "action": "systemctl poweroff", "text": "Power Off" }"#,
+        )
+        .unwrap();
+
+        let second = state.get_buttons_from(&candidates);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].action, "swaylock -f");
+        assert_eq!(second[1].text, "Power Off");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn availability_filtering_respects_hide_unavailable_flag() {
-        let none_available = PowerAvailability {
-            can_suspend: false,
-            can_hibernate: false,
-        };
-
-        // When hide_unavailable is false, all actions remain in order.
-        let kept = filter_actions(&ORDERED_ACTIONS, false, none_available);
-        assert_eq!(kept, ORDERED_ACTIONS.to_vec());
-
-        // When hide_unavailable is true and neither suspend nor hibernate is available.
-        let filtered = filter_actions(&ORDERED_ACTIONS, true, none_available);
+    fn missing_layout_file_falls_back_to_defaults() {
+        let state = PowerState::new();
+        let buttons = state.get_buttons_from(&[PathBuf::from("/nonexistent/wlogout/layout")]);
+        let labels: Vec<&str> = buttons.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(
-            filtered,
-            vec![
-                PowerAction::Lock,
-                PowerAction::Logout,
-                PowerAction::Reboot,
-                PowerAction::Shutdown,
-            ]
+            labels,
+            vec!["lock", "suspend", "hibernate", "logout", "reboot", "shutdown"]
         );
-
-        // Only suspend available -> hibernate omitted, order preserved.
-        let suspend_only = filter_actions(
-            &ORDERED_ACTIONS,
-            true,
-            PowerAvailability {
-                can_suspend: true,
-                can_hibernate: false,
-            },
-        );
-        assert_eq!(
-            suspend_only,
-            vec![
-                PowerAction::Lock,
-                PowerAction::Suspend,
-                PowerAction::Logout,
-                PowerAction::Reboot,
-                PowerAction::Shutdown,
-            ]
-        );
-
-        // Only hibernate available -> suspend omitted, order preserved.
-        let hibernate_only = filter_actions(
-            &ORDERED_ACTIONS,
-            true,
-            PowerAvailability {
-                can_suspend: false,
-                can_hibernate: true,
-            },
-        );
-        assert_eq!(
-            hibernate_only,
-            vec![
-                PowerAction::Lock,
-                PowerAction::Hibernate,
-                PowerAction::Logout,
-                PowerAction::Reboot,
-                PowerAction::Shutdown,
-            ]
-        );
-    }
-
-    #[test]
-    fn uwsm_env_detection() {
-        assert!(has_uwsm_env(None, Some("WAYLAND_DISPLAY DISPLAY")));
-        assert!(has_uwsm_env(Some("Hyprland-uwsm"), None));
-        assert!(has_uwsm_env(Some("UWSM"), None));
-        assert!(!has_uwsm_env(Some("Hyprland"), None));
-        assert!(!has_uwsm_env(Some("Hyprland"), Some("   ")));
-        assert!(!has_uwsm_env(None, None));
     }
 }

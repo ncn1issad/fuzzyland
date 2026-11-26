@@ -141,9 +141,7 @@ impl Default for BacklightConfig {
 #[serde(default)]
 pub struct PowerConfig {
     pub confirm: Vec<String>,
-    pub hide_unavailable: bool,
-    pub lock_cmd: Option<String>,
-    pub logout_cmd: Option<String>,
+    pub layout_path: Option<String>,
 }
 
 impl Default for PowerConfig {
@@ -154,9 +152,7 @@ impl Default for PowerConfig {
                 "reboot".to_string(),
                 "shutdown".to_string(),
             ],
-            hide_unavailable: false,
-            lock_cmd: None,
-            logout_cmd: None,
+            layout_path: None,
         }
     }
 }
@@ -435,7 +431,7 @@ mod tests {
         assert_eq!(cfg.backlight.i2c_settle_ms, 40);
         assert_eq!(cfg.backlight.internal_prefixes, vec!["eDP-", "LVDS-", "DSI-"]);
         assert_eq!(cfg.power.confirm, vec!["logout", "reboot", "shutdown"]);
-        assert!(!cfg.power.hide_unavailable);
+        assert!(cfg.power.layout_path.is_none());
         assert_eq!(cfg.screenshot.save_dir, "~/Pictures/Screenshots");
         assert_eq!(cfg.media.max_track_len, 44);
         assert_eq!(cfg.icons.wifi_levels.len(), 5);
@@ -453,8 +449,7 @@ muted = "#7f849c"
 warning_threshold = 30
 
 [power]
-hide_unavailable = true
-lock_cmd = "swaylock"
+layout_path = "~/.config/wlogout/layout"
 
 [media]
 max_track_len = 60
@@ -465,8 +460,10 @@ max_track_len = 60
         assert_eq!(cfg.tooltip.muted, "#7f849c");
         assert_eq!(cfg.battery.warning_threshold, 30);
         assert_eq!(cfg.battery.critical_threshold, 10);
-        assert!(cfg.power.hide_unavailable);
-        assert_eq!(cfg.power.lock_cmd.as_deref(), Some("swaylock"));
+        assert_eq!(
+            cfg.power.layout_path.as_deref(),
+            Some("~/.config/wlogout/layout")
+        );
         assert_eq!(cfg.power.confirm, vec!["logout", "reboot", "shutdown"]);
         assert_eq!(cfg.media.max_track_len, 60);
     }

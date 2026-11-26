@@ -30,6 +30,7 @@ pub struct AppContext {
     pub backlight: Arc<modules::backlight::BacklightState>,
     pub bluetooth: Arc<modules::bluetooth::BluetoothState>,
     pub media: Arc<modules::media::MediaState>,
+    pub power: Arc<modules::power::PowerState>,
     pub is_daemon: bool,
 }
 
@@ -45,6 +46,7 @@ impl AppContext {
             backlight: Arc::new(modules::backlight::BacklightState::new()),
             bluetooth: Arc::new(modules::bluetooth::BluetoothState::new()),
             media: Arc::new(modules::media::MediaState::new()),
+            power: Arc::new(modules::power::PowerState::new()),
             is_daemon: false,
         })
     }
@@ -72,6 +74,9 @@ impl AppContext {
             }
         }
 
+        let power = Arc::new(modules::power::PowerState::new());
+        power.warm_load(&config.power);
+
         Arc::new(Self {
             config: Arc::new(config),
             menu: MenuCoordinator::new(false),
@@ -82,6 +87,7 @@ impl AppContext {
             backlight: Arc::new(modules::backlight::BacklightState::new()),
             bluetooth: Arc::new(modules::bluetooth::BluetoothState::new()),
             media: Arc::new(modules::media::MediaState::new()),
+            power,
             is_daemon: true,
         })
     }

@@ -152,10 +152,6 @@ pub async fn active_window() -> Option<ActiveWindow> {
     }
 }
 
-pub async fn dispatch(args: &str) -> Result<String> {
-    query_raw(&format!("dispatch {args}")).await
-}
-
 pub fn find_monitor_at_cursor(pos: &CursorPos, monitors: &[Monitor]) -> Option<String> {
     for mon in monitors {
         let scale = if mon.scale > 0.0 { mon.scale } else { 1.0 };

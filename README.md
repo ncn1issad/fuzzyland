@@ -20,7 +20,7 @@ Provides interactive Fuzzel menus, streaming Waybar status widgets, and desktop 
 | **Battery & Power Profiles** | `org.freedesktop.UPower` + `PowerProfiles` (`zbus`) | None |
 | **Audio Output & Input** | `libpulse-binding` (`pipewire-pulse` / PulseAudio) + `systemd1` (`zbus`) | `easyeffects` *(when installed)* |
 | **External Backlight** | Linux `/dev/i2c-*` DDC/CI (VCP `0x10`) + `/sys/class/drm` EDID + Hyprland `socket2` | None |
-| **Power / Session** | `org.freedesktop.login1` (`zbus`) + `systemd1` + Hyprland IPC | `hyprlock`, `uwsm` |
+| **Power / Session** | Live-cached `wlogout` layout (`~/.config/wlogout/layout`) | `wlogout` layout actions *(optional)* |
 | **Hyprland IPC** | Direct Unix sockets (`.socket.sock` & `.socket2.sock`) | None |
 | **Notifications** | `org.freedesktop.Notifications` (`zbus`) | None |
 | **Media** | `org.mpris.MediaPlayer2.*` (`zbus`) | None |
@@ -112,9 +112,7 @@ internal_prefixes = ["eDP-", "LVDS-", "DSI-"]
 
 [power]
 confirm = ["logout", "reboot", "shutdown"]
-hide_unavailable = false
-# lock_cmd = "hyprlock"
-# logout_cmd = "uwsm stop"
+# layout_path = "~/.config/wlogout/layout"
 
 [screenshot]
 save_dir = "~/Pictures/Screenshots"
