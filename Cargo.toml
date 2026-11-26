@@ -13,7 +13,6 @@ libc = "0.2"
 libpulse-binding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "process", "signal", "macros"] }
 toml = "0.8"
 tracing = "0.1"

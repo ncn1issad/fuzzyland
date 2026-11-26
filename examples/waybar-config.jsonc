@@ -1,0 +1,69 @@
+// Example Waybar modules using fuzzyland (daemon streaming + click bindings).
+// Note: custom/battery and custom/external-backlight stream newline-delimited JSON
+// continuously from `fuzzyland daemon`, so they need no `interval` or `signal`.
+{
+  "modules-right": [
+    "custom/external-backlight",
+    "pulseaudio",
+    "network",
+    "bluetooth",
+    "custom/battery",
+    "custom/clipboard",
+    "custom/power"
+  ],
+
+  "custom/battery": {
+    "exec": "fuzzyland battery status",
+    "return-type": "json",
+    "on-click": "fuzzyland battery menu",
+    "tooltip": true
+  },
+
+  "custom/external-backlight": {
+    "exec": "fuzzyland backlight status",
+    "return-type": "json",
+    "on-scroll-up": "fuzzyland backlight adjust +5",
+    "on-scroll-down": "fuzzyland backlight adjust -5",
+    "on-click": "fuzzyland backlight refresh",
+    "tooltip": true
+  },
+
+  "network": {
+    "format-wifi": "󰤨  {essid}",
+    "format-ethernet": "󰈀  {ifname}",
+    "format-disconnected": "󰤭  Offline",
+    "on-click": "fuzzyland network"
+  },
+
+  "bluetooth": {
+    "format": "󰂯",
+    "format-connected": "󰂱  {num_connections}",
+    "format-off": "󰂲",
+    "on-click": "fuzzyland bluetooth",
+    "on-click-right": "fuzzyland bluetooth --toggle-power"
+  },
+
+  "pulseaudio": {
+    "format": "{icon}  {volume}%",
+    "format-muted": "󰖁  Muted",
+    "format-icons": {
+      "default": ["󰕿", "󰖀", "󰕾"]
+    },
+    "on-click": "fuzzyland audio output",
+    "on-click-middle": "fuzzyland audio output --toggle-eq",
+    "on-click-right": "fuzzyland audio input"
+  },
+
+  "custom/clipboard": {
+    "format": "󰅌",
+    "tooltip-format": "Clipboard history\nRight-click: Clear history",
+    "on-click": "fuzzyland clipboard",
+    "on-click-right": "fuzzyland clipboard --clear"
+  },
+
+  "custom/power": {
+    "format": "󰐥",
+    "tooltip-format": "Power menu",
+    "on-click": "fuzzyland power"
+  }
+}

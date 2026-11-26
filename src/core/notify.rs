@@ -59,11 +59,13 @@ impl Notification {
         self
     }
 
+    #[allow(dead_code)]
     pub fn replaces_id(mut self, id: u32) -> Self {
         self.replaces_id = id;
         self
     }
 
+    #[allow(dead_code)]
     pub fn timeout_ms(mut self, timeout_ms: i32) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -140,5 +142,30 @@ impl Notifier {
 impl Default for Notifier {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_builder_sets_all_fields() {
+        let notif = Notification::new("Fuzzyland", "Title")
+            .body("Details")
+            .icon("/tmp/preview.png")
+            .urgency(Urgency::Critical)
+            .sync_id("sync-key")
+            .replaces_id(42)
+            .timeout_ms(5000);
+
+        assert_eq!(notif.app_name, "Fuzzyland");
+        assert_eq!(notif.summary, "Title");
+        assert_eq!(notif.body, "Details");
+        assert_eq!(notif.icon.as_deref(), Some("/tmp/preview.png"));
+        assert_eq!(notif.urgency, Urgency::Critical);
+        assert_eq!(notif.sync_id.as_deref(), Some("sync-key"));
+        assert_eq!(notif.replaces_id, 42);
+        assert_eq!(notif.timeout_ms, 5000);
     }
 }

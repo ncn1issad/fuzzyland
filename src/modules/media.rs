@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn select_player_prefers_playing_over_paused() {
-        let players = vec![
+        let players = [
             make_player("org.mpris.MediaPlayer2.spotify", PlaybackStatus::Paused, 100),
             make_player("org.mpris.MediaPlayer2.mpv", PlaybackStatus::Playing, 1),
         ];
@@ -857,7 +857,7 @@ mod tests {
 
     #[test]
     fn select_player_breaks_ties_by_recency() {
-        let playing = vec![
+        let playing = [
             make_player("org.mpris.MediaPlayer2.a", PlaybackStatus::Playing, 5),
             make_player("org.mpris.MediaPlayer2.b", PlaybackStatus::Playing, 12),
             make_player("org.mpris.MediaPlayer2.c", PlaybackStatus::Playing, 9),
@@ -867,7 +867,7 @@ mod tests {
             "org.mpris.MediaPlayer2.b"
         );
 
-        let paused = vec![
+        let paused = [
             make_player("org.mpris.MediaPlayer2.x", PlaybackStatus::Paused, 20),
             make_player("org.mpris.MediaPlayer2.y", PlaybackStatus::Paused, 30),
         ];
@@ -882,7 +882,7 @@ mod tests {
         assert_eq!(PlaybackStatus::from_mpris("Stopped"), PlaybackStatus::Stopped);
         assert_eq!(PlaybackStatus::from_mpris("Invalid"), PlaybackStatus::Stopped);
 
-        let players = vec![
+        let players = [
             make_player("org.mpris.MediaPlayer2.a", PlaybackStatus::Stopped, 50),
             make_player("org.mpris.MediaPlayer2.b", PlaybackStatus::Stopped, 99),
         ];

@@ -807,7 +807,7 @@ fn classify_battery_state<'a>(
     }
 }
 
-fn battery_icon<'a>(pct: u8, icons: &'a IconsConfig) -> &'a str {
+fn battery_icon(pct: u8, icons: &IconsConfig) -> &str {
     let levels = &icons.battery_levels;
     if levels.is_empty() {
         return &icons.battery_unknown;

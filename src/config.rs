@@ -414,3 +414,87 @@ impl Default for IconsConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_toml_uses_theme_agnostic_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.fuzzel.binary, "fuzzel");
+        assert_eq!(cfg.fuzzel.anchor_margin_x, 10);
+        assert!(cfg.tooltip.text.is_empty());
+        assert!(cfg.tooltip.subtext.is_empty());
+        assert!(cfg.tooltip.muted.is_empty());
+        assert!(cfg.tooltip.separator.is_empty());
+        assert_eq!(cfg.battery.warning_threshold, 25);
+        assert_eq!(cfg.battery.critical_threshold, 10);
+        assert_eq!(cfg.backlight.debounce_ms, 120);
+        assert_eq!(cfg.backlight.poll_interval_secs, 30);
+        assert_eq!(cfg.backlight.i2c_settle_ms, 40);
+        assert_eq!(cfg.backlight.internal_prefixes, vec!["eDP-", "LVDS-", "DSI-"]);
+        assert_eq!(cfg.power.confirm, vec!["logout", "reboot", "shutdown"]);
+        assert!(!cfg.power.hide_unavailable);
+        assert_eq!(cfg.screenshot.save_dir, "~/Pictures/Screenshots");
+        assert_eq!(cfg.media.max_track_len, 44);
+        assert_eq!(cfg.icons.wifi_levels.len(), 5);
+        assert_eq!(cfg.icons.battery_levels.len(), 10);
+    }
+
+    #[test]
+    fn partial_toml_overrides_only_specified_fields() {
+        let raw = r##"
+[tooltip]
+text = "#cdd6f4"
+muted = "#7f849c"
+
+[battery]
+warning_threshold = 30
+
+[power]
+hide_unavailable = true
+lock_cmd = "swaylock"
+
+[media]
+max_track_len = 60
+"##;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.tooltip.text, "#cdd6f4");
+        assert!(cfg.tooltip.subtext.is_empty());
+        assert_eq!(cfg.tooltip.muted, "#7f849c");
+        assert_eq!(cfg.battery.warning_threshold, 30);
+        assert_eq!(cfg.battery.critical_threshold, 10);
+        assert!(cfg.power.hide_unavailable);
+        assert_eq!(cfg.power.lock_cmd.as_deref(), Some("swaylock"));
+        assert_eq!(cfg.power.confirm, vec!["logout", "reboot", "shutdown"]);
+        assert_eq!(cfg.media.max_track_len, 60);
+    }
+
+    #[test]
+    fn load_from_missing_file_returns_defaults() {
+        let cfg = Config::load_from(Path::new("/nonexistent/fuzzyland/config.toml"));
+        assert_eq!(cfg.fuzzel.binary, "fuzzel");
+    }
+
+    #[test]
+    fn expand_tilde_handles_home_and_absolute_paths() {
+        assert_eq!(expand_tilde("/tmp/shots"), PathBuf::from("/tmp/shots"));
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expand_tilde("~"), home);
+            assert_eq!(
+                expand_tilde("~/Pictures/Screenshots"),
+                home.join("Pictures/Screenshots")
+            );
+        }
+    }
+
+    #[test]
+    fn catppuccin_example_config_parses_cleanly() {
+        let raw = include_str!("../examples/catppuccin-mocha.toml");
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.tooltip.text, "#cdd6f4");
+        assert_eq!(cfg.screenshot.slurp_border, "#b4befeff");
+        assert_eq!(cfg.screenshot.slurp_font, "JetBrains Mono");
+    }
+}

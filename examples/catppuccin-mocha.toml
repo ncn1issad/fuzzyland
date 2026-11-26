@@ -1,0 +1,16 @@
+# Optional Catppuccin Mocha (Lavender) theme preset for fuzzyland.
+# Copy to ~/.config/fuzzyland/config.toml to match hypr-mocha-dots colors.
+# Omit or leave color strings empty to stay theme-agnostic (inherited foreground + Pango alpha).
+
+[tooltip]
+text = "#cdd6f4"
+subtext = "#a6adc8"
+muted = "#7f849c"
+separator = "#45475a"
+
+[screenshot]
+slurp_bg = "#1e1e2e88"
+slurp_border = "#b4befeff"
+slurp_selection = "#31324433"
+slurp_box = "#1e1e2edd"
+slurp_font = "JetBrains Mono"

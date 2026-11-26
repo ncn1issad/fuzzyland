@@ -105,10 +105,6 @@ fn hypr_socket_path(filename: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn is_available() -> bool {
-    hypr_socket_path(".socket.sock").is_some()
-}
-
 pub async fn query_raw(command: &str) -> Result<String> {
     let path = hypr_socket_path(".socket.sock")
         .ok_or_else(|| anyhow!("Hyprland IPC socket not available"))?;
@@ -229,5 +225,78 @@ impl HyprEventStream {
                 }));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mon(name: &str, x: i32, y: i32, w: u32, h: u32, scale: f64, transform: u8) -> Monitor {
+        Monitor {
+            name: name.to_string(),
+            x,
+            y,
+            width: w,
+            height: h,
+            scale,
+            transform,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hit_tests_scaled_and_transformed_monitors() {
+        let mons = [
+            // 2560x1600 @ 1.6x => logical 1600x1000 at (0, 0)
+            mon("eDP-1", 0, 0, 2560, 1600, 1.6, 0),
+            // 3840x2160 @ 1.5x rotated 90deg (transform 1) => logical 1440x2560 at (1600, -500)
+            mon("DP-1", 1600, -500, 3840, 2160, 1.5, 1),
+        ];
+
+        // Inside eDP-1
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: 0.0, y: 0.0 }, &mons).as_deref(),
+            Some("eDP-1")
+        );
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: 1599.9, y: 999.9 }, &mons).as_deref(),
+            Some("eDP-1")
+        );
+
+        // Right edge is exclusive for eDP-1, lands on rotated DP-1
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: 1600.0, y: 0.0 }, &mons).as_deref(),
+            Some("DP-1")
+        );
+        // Inside rotated DP-1 height (y up to -500 + 2560 = 2060)
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: 3039.0, y: 2059.0 }, &mons).as_deref(),
+            Some("DP-1")
+        );
+        // Past rotated DP-1 width (1600 + 1440 = 3040)
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: 3040.0, y: 0.0 }, &mons),
+            None
+        );
+        // Outside both
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: -10.0, y: 10.0 }, &mons),
+            None
+        );
+    }
+
+    #[test]
+    fn hit_test_handles_zero_scale_safely() {
+        let mons = [mon("HDMI-A-1", 0, 0, 1920, 1080, 0.0, 3)];
+        // transform=3 swaps 1920x1080 -> 1080x1920, scale<=0 defaults to 1.0
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: 1000.0, y: 1800.0 }, &mons).as_deref(),
+            Some("HDMI-A-1")
+        );
+        assert_eq!(
+            find_monitor_at_cursor(&CursorPos { x: 1200.0, y: 500.0 }, &mons),
+            None
+        );
     }
 }

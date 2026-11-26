@@ -107,3 +107,78 @@ impl<'a> TooltipFormatter<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pango_escape_handles_all_special_chars() {
+        assert_eq!(
+            pango_escape(r#"A & B <tag> "quoted" 'single'"#),
+            "A &amp; B &lt;tag&gt; &quot;quoted&quot; &apos;single&apos;"
+        );
+    }
+
+    #[test]
+    fn tooltip_formatter_defaults_are_theme_agnostic() {
+        let cfg = TooltipConfig::default();
+        let fmt = TooltipFormatter::new(&cfg);
+
+        assert_eq!(fmt.header("Battery & Power"), "<b>Battery &amp; Power</b>");
+        assert_eq!(fmt.line("Mouse <1>"), "Mouse &lt;1&gt;");
+        assert_eq!(
+            fmt.subtext("Balanced"),
+            "<span alpha='75%'>Balanced</span>"
+        );
+        assert_eq!(
+            fmt.divider(),
+            format!("<span alpha='30%'>{TOOLTIP_RULE}</span>")
+        );
+        assert_eq!(
+            fmt.footer("Left: Power profile"),
+            "<span alpha='55%'>Left: Power profile</span>"
+        );
+    }
+
+    #[test]
+    fn tooltip_formatter_applies_custom_colors_when_configured() {
+        let cfg = TooltipConfig {
+            text: "#cdd6f4".to_string(),
+            subtext: "#a6adc8".to_string(),
+            muted: "#7f849c".to_string(),
+            separator: "#45475a".to_string(),
+        };
+        let fmt = TooltipFormatter::new(&cfg);
+
+        assert_eq!(
+            fmt.header("85%"),
+            "<b><span color='#cdd6f4'>85%</span></b>"
+        );
+        assert_eq!(fmt.line("Item"), "<span color='#cdd6f4'>Item</span>");
+        assert_eq!(fmt.subtext("Meta"), "<span color='#a6adc8'>Meta</span>");
+        assert_eq!(
+            fmt.divider(),
+            format!("<span color='#45475a'>{TOOLTIP_RULE}</span>")
+        );
+        assert_eq!(fmt.footer("Hint"), "<span color='#7f849c'>Hint</span>");
+    }
+
+    #[test]
+    fn waybar_output_omits_empty_optional_fields() {
+        let empty = WaybarOutput::empty();
+        assert_eq!(empty.to_json_line(), r#"{"text":""}"#);
+
+        let full = WaybarOutput {
+            text: "80%".to_string(),
+            tooltip: Some("tip".to_string()),
+            class: vec!["charging".to_string()],
+            percentage: Some(80),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&full.to_json_line()).unwrap();
+        assert_eq!(parsed["text"], "80%");
+        assert_eq!(parsed["tooltip"], "tip");
+        assert_eq!(parsed["class"], serde_json::json!(["charging"]));
+        assert_eq!(parsed["percentage"], 80);
+    }
+}
