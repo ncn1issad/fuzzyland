@@ -195,15 +195,15 @@ Each task owns a single isolated module file (`src/modules/<name>.rs`) against t
 
 ## Sequence 3 — Integration, Verification & Docs *(Sequential — Final Pass)*
 
-- [ ] **3.1 Wire Modules into Daemon & CLI**
+- [x] **3.1 Wire Modules into Daemon & CLI**
   - Connect all 9 modules into `src/daemon/mod.rs` (warm caches, background D-Bus/Hyprland/I2C tasks, IPC dispatch) and `src/main.rs` (client & standalone fallback paths).
-- [ ] **3.2 Build, Lint & Tests**
+- [x] **3.2 Build, Lint & Tests**
   - Unit tests for EDID/DDC checksums, Pango escaping & tooltip rendering, battery time/icon formatting, PNG IHDR parsing, Hyprland monitor hit-testing (scale + transform), Wi-Fi SSID deduplication/security mapping, config deserialization.
   - Run `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo build --release`.
-- [ ] **3.3 Examples & Documentation**
+- [x] **3.3 Examples & Documentation**
   - `examples/waybar-config.jsonc` (showing streaming `custom/battery` and `custom/external-backlight` with no `interval`/`signal`, plus all `fuzzyland` click bindings).
   - `examples/fuzzyland.service` (systemd user service for `fuzzyland daemon`).
   - `examples/catppuccin-mocha.toml` (optional theme preset matching `hypr-mocha-dots`).
   - `README.md` (install, setup, config reference, Waybar/Hyprland/Hyprlock migration guide).
-- [ ] **3.4 Live Session Smoke Test**
+- [x] **3.4 Live Session Smoke Test**
   - Verify `fuzzyland daemon` startup/RSS, streaming Waybar JSON output, menu toggling/dismissal, and subcommands against the running Hyprland session.
