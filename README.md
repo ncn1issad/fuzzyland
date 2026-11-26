@@ -2,7 +2,7 @@
 
 A fast, theme-agnostic, single-binary **Rust** shell daemon and CLI for **Hyprland + Waybar + Fuzzel**.
 
-Replaces Python/Bash desktop helper scripts with native Linux protocol integrations (D-Bus via `zbus`, PulseAudio/PipeWire via `libpulse-binding`, Linux `/dev/i2c-*` DDC/CI, `/sys/class/drm` EDID, `/dev/rfkill`, and direct Hyprland Unix sockets) while keeping memory usage low and startup instant.
+Provides interactive Fuzzel menus, streaming Waybar status widgets, and desktop controls using native Linux protocol integrations (D-Bus via `zbus`, PulseAudio/PipeWire via `libpulse-binding`, Linux `/dev/i2c-*` DDC/CI, `/sys/class/drm` EDID, `/dev/rfkill`, and direct Hyprland Unix sockets) while keeping memory usage low and startup instant.
 
 ## Features
 
@@ -133,7 +133,7 @@ max_track_len = 44
 
 See [examples/catppuccin-mocha.toml](examples/catppuccin-mocha.toml) for a drop-in Catppuccin Mocha preset.
 
-## Waybar, Hyprland & Hyprlock Migration
+## Waybar, Hyprland & Hyprlock Integration
 
 ### Waybar
 
@@ -166,7 +166,7 @@ bind = SUPER, Print, exec, fuzzyland screenshot active-window --save
 
 ### Hyprlock Media Widgets
 
-Replace `hyprlock-media` calls in `hyprlock.conf` with `fuzzyland media`:
+Use `fuzzyland media` inside `hyprlock.conf` labels and click handlers:
 
 ```ini
 text = cmd[update:1000] fuzzyland media track
@@ -175,18 +175,4 @@ text = cmd[update:1000] fuzzyland media toggle
 text = cmd[update:1000] fuzzyland media next
 ```
 
-### Legacy Script Mapping
-
-| Legacy Script | `fuzzyland` Command |
-| --- | --- |
-| `waybar-network-menu` | `fuzzyland network` |
-| `waybar-bluetooth-menu` | `fuzzyland bluetooth` / `fuzzyland bluetooth --toggle-power` |
-| `waybar-battery-status` | `fuzzyland battery status` (or `--once`) |
-| `waybar-battery-menu` | `fuzzyland battery menu` / `fuzzyland battery profile <name>` |
-| `waybar-output-menu` | `fuzzyland audio output` / `fuzzyland audio output --toggle-eq` |
-| `waybar-input-menu` | `fuzzyland audio input` / `fuzzyland audio input --toggle-fx` |
-| `waybar-external-backlight` | `fuzzyland backlight status` / `adjust <DELTA>` / `refresh` |
-| `waybar-power-menu` | `fuzzyland power` |
-| `waybar-clipboard-menu` | `fuzzyland clipboard` / `fuzzyland clipboard --clear` |
-| `screenshot` | `fuzzyland screenshot [mode] [-s] [--dir PATH] [--delay SECS]` |
-| `hyprlock-media` | `fuzzyland media <track\|previous\|toggle\|next\|play-pause\|prev\|skip>` |
+Control actions (`fuzzyland media play-pause`, `prev`, `skip`) can be bound to click handlers or media keys.
