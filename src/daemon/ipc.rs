@@ -1,4 +1,5 @@
 use crate::config::runtime_dir;
+use crate::modules::audio::AudioTarget;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -19,6 +20,7 @@ pub fn lock_path() -> PathBuf {
 pub enum IpcRequest {
     Ping,
     Network,
+    NetworkToggleWifi,
     Bluetooth {
         toggle_power: bool,
     },
@@ -35,6 +37,13 @@ pub enum IpcRequest {
     AudioInput {
         toggle_fx: bool,
     },
+    AudioToggleMute {
+        target: AudioTarget,
+    },
+    AudioVolume {
+        target: AudioTarget,
+        delta: i32,
+    },
     BacklightStatus {
         once: bool,
     },
@@ -42,6 +51,17 @@ pub enum IpcRequest {
         delta: i32,
     },
     BacklightRefresh,
+    InternalBacklightAdjust {
+        delta: i32,
+        device: Option<String>,
+    },
+    InternalBacklightDim {
+        percent: u8,
+        device: Option<String>,
+    },
+    InternalBacklightRestore {
+        device: Option<String>,
+    },
     Power,
     Clipboard {
         clear: bool,

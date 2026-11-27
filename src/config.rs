@@ -7,8 +7,10 @@ use tracing::warn;
 pub struct Config {
     pub fuzzel: FuzzelConfig,
     pub tooltip: TooltipConfig,
+    pub audio: AudioConfig,
     pub battery: BatteryConfig,
     pub backlight: BacklightConfig,
+    pub clipboard: ClipboardConfig,
     pub power: PowerConfig,
     pub screenshot: ScreenshotConfig,
     pub media: MediaConfig,
@@ -95,6 +97,28 @@ pub struct TooltipConfig {
     pub subtext: String,
     pub muted: String,
     pub separator: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub max_volume: u16,
+    pub unmute_on_volume_up: bool,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            max_volume: 100,
+            unmute_on_volume_up: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipboardConfig {
+    pub watch: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,6 +448,7 @@ mod tests {
         assert!(cfg.tooltip.subtext.is_empty());
         assert!(cfg.tooltip.muted.is_empty());
         assert!(cfg.tooltip.separator.is_empty());
+        assert!(!cfg.audio.unmute_on_volume_up);
         assert_eq!(cfg.battery.warning_threshold, 25);
         assert_eq!(cfg.battery.critical_threshold, 10);
         assert_eq!(cfg.backlight.debounce_ms, 120);
@@ -445,6 +470,9 @@ mod tests {
 text = "#cdd6f4"
 muted = "#7f849c"
 
+[audio]
+unmute_on_volume_up = true
+
 [battery]
 warning_threshold = 30
 
@@ -458,6 +486,8 @@ max_track_len = 60
         assert_eq!(cfg.tooltip.text, "#cdd6f4");
         assert!(cfg.tooltip.subtext.is_empty());
         assert_eq!(cfg.tooltip.muted, "#7f849c");
+        assert!(cfg.audio.unmute_on_volume_up);
+        assert_eq!(cfg.audio.max_volume, 100);
         assert_eq!(cfg.battery.warning_threshold, 30);
         assert_eq!(cfg.battery.critical_threshold, 10);
         assert_eq!(

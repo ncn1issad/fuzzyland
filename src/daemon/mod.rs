@@ -141,6 +141,8 @@ fn acquire_daemon_lock() -> Result<File> {
 
 pub async fn run_daemon(config: Config) -> Result<()> {
     let _lock_file = acquire_daemon_lock()?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
     let sock_path = socket_path();
     if sock_path.exists() {
@@ -158,13 +160,13 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     modules::backlight::spawn_background(Arc::clone(&ctx));
     modules::bluetooth::spawn_background(Arc::clone(&ctx));
     modules::media::spawn_background(Arc::clone(&ctx));
+    let clipboard_watchers = ctx.config.clipboard.watch.then(|| {
+        let (shutdown, receiver) = watch::channel(false);
+        let task = tokio::spawn(modules::clipboard::supervise_watchers(receiver));
+        (shutdown, task)
+    });
 
     info!("fuzzyland daemon listening on {}", sock_path.display());
-
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut sigint =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
     loop {
         tokio::select! {
@@ -195,6 +197,12 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     }
 
     let _ = std::fs::remove_file(&sock_path);
+    if let Some((shutdown, task)) = clipboard_watchers {
+        let _ = shutdown.send(true);
+        if let Err(err) = task.await {
+            warn!("Clipboard watcher task failed: {err}");
+        }
+    }
     Ok(())
 }
 
@@ -259,6 +267,13 @@ async fn stream_watch<W: tokio::io::AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+fn control_response(result: Result<()>) -> IpcResponse {
+    match result {
+        Ok(()) => IpcResponse::ok_empty(),
+        Err(err) => IpcResponse::error(format!("{err:#}")),
+    }
+}
+
 async fn dispatch_request(ctx: &Arc<AppContext>, req: IpcRequest) -> IpcResponse {
     match req {
         IpcRequest::Ping => IpcResponse::ok_line("pong"),
@@ -266,6 +281,7 @@ async fn dispatch_request(ctx: &Arc<AppContext>, req: IpcRequest) -> IpcResponse
             Ok(()) => IpcResponse::ok_empty(),
             Err(err) => IpcResponse::error(err.to_string()),
         },
+        IpcRequest::NetworkToggleWifi => control_response(modules::network::toggle_wifi(ctx).await),
         IpcRequest::Bluetooth { toggle_power } => {
             let res = if toggle_power {
                 modules::bluetooth::toggle_power(ctx).await
@@ -313,6 +329,12 @@ async fn dispatch_request(ctx: &Arc<AppContext>, req: IpcRequest) -> IpcResponse
                 Err(err) => IpcResponse::error(err.to_string()),
             }
         }
+        IpcRequest::AudioToggleMute { target } => {
+            control_response(modules::audio::toggle_mute(target).await)
+        }
+        IpcRequest::AudioVolume { target, delta } => control_response(
+            modules::audio::adjust_volume(target, delta, &ctx.config.audio).await,
+        ),
         IpcRequest::BacklightStatus { once: _ } => {
             match modules::backlight::status_once(ctx).await {
                 Ok(out) => IpcResponse::ok_line(out.to_json_line()),
@@ -329,6 +351,15 @@ async fn dispatch_request(ctx: &Arc<AppContext>, req: IpcRequest) -> IpcResponse
             Ok(()) => IpcResponse::ok_empty(),
             Err(err) => IpcResponse::error(err.to_string()),
         },
+        IpcRequest::InternalBacklightAdjust { delta, device } => control_response(
+            modules::internal_backlight::adjust(ctx, delta, device.as_deref()).await,
+        ),
+        IpcRequest::InternalBacklightDim { percent, device } => control_response(
+            modules::internal_backlight::dim(ctx, percent, device.as_deref()).await,
+        ),
+        IpcRequest::InternalBacklightRestore { device } => {
+            control_response(modules::internal_backlight::restore(ctx, device.as_deref()).await)
+        }
         IpcRequest::Power => match modules::power::run_menu(ctx).await {
             Ok(()) => IpcResponse::ok_empty(),
             Err(err) => IpcResponse::error(err.to_string()),

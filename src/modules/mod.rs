@@ -3,6 +3,7 @@ pub mod backlight;
 pub mod battery;
 pub mod bluetooth;
 pub mod clipboard;
+pub mod internal_backlight;
 pub mod media;
 pub mod network;
 pub mod power;

@@ -2,15 +2,15 @@ use crate::core::clipboard;
 use crate::core::fuzzel::{self, Anchor, FuzzelOptions};
 use crate::core::hyprland;
 use crate::core::notify::{Notification, Urgency};
+use crate::core::process::spawn_reaped;
 use crate::daemon::menu::{MenuGuard, MenuKind, MenuSession};
 use crate::daemon::AppContext;
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::unix::process::CommandExt;
-use std::process::Stdio;
 use std::time::Duration;
+use tokio::process::Command;
 use tracing::{debug, warn};
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
@@ -102,6 +102,8 @@ trait NetworkManager {
     fn networking_enabled(&self) -> zbus::Result<bool>;
     #[zbus(property)]
     fn wireless_enabled(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn wireless_hardware_enabled(&self) -> zbus::Result<bool>;
     #[zbus(property)]
     fn set_wireless_enabled(&self, value: bool) -> zbus::Result<()>;
     #[zbus(property)]
@@ -525,8 +527,81 @@ enum ActivationOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// Entry Point
+// Entry Points
 // ---------------------------------------------------------------------------
+
+static WIFI_TOGGLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+pub async fn toggle_wifi(ctx: &AppContext) -> Result<()> {
+    let _guard = WIFI_TOGGLE_LOCK.lock().await;
+
+    let conn = match ctx.system_bus().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            notify_err(ctx, "Failed to toggle Wi-Fi", &err.to_string()).await;
+            return Err(err);
+        }
+    };
+    let nm = match nm_proxy(conn).await {
+        Ok(nm) => nm,
+        Err(err) => {
+            notify_err(ctx, "Failed to toggle Wi-Fi", &err.to_string()).await;
+            return Err(err);
+        }
+    };
+    let enabled = match nm.wireless_enabled().await {
+        Ok(enabled) => enabled,
+        Err(err) => {
+            notify_err(ctx, "Failed to toggle Wi-Fi", &err.to_string()).await;
+            return Err(err.into());
+        }
+    };
+
+    set_wifi_enabled(ctx, &nm, !enabled).await
+}
+
+async fn set_wifi_enabled(
+    ctx: &AppContext,
+    nm: &NetworkManagerProxy<'_>,
+    enable: bool,
+) -> Result<()> {
+    match nm.set_wireless_enabled(enable).await {
+        Ok(()) => {
+            if enable
+                && matches!(nm.wireless_enabled().await, Ok(false))
+                && matches!(nm.wireless_hardware_enabled().await, Ok(false))
+            {
+                let msg = "Wi-Fi is blocked by a hardware switch";
+                notify_err(ctx, "Failed to enable Wi-Fi", msg).await;
+                return Err(anyhow!("{msg}"));
+            }
+            notify_info(
+                ctx,
+                if enable {
+                    "Wi-Fi enabled"
+                } else {
+                    "Wi-Fi disabled"
+                },
+                "",
+            )
+            .await;
+            Ok(())
+        }
+        Err(err) => {
+            notify_err(
+                ctx,
+                if enable {
+                    "Failed to enable Wi-Fi"
+                } else {
+                    "Failed to disable Wi-Fi"
+                },
+                &err.to_string(),
+            )
+            .await;
+            Err(err.into())
+        }
+    }
+}
 
 pub async fn run_menu(ctx: &AppContext) -> Result<()> {
     let guard = match ctx.menu.begin_session(MenuKind::Network) {
@@ -754,17 +829,13 @@ async fn show_main_menu(
             Ok(MenuActionResult::Exit)
         }
         MainAction::WifiOn => {
-            match nm.set_wireless_enabled(true).await {
-                Ok(()) => notify_info(ctx, "Wi-Fi enabled", "").await,
-                Err(err) => notify_err(ctx, "Failed to enable Wi-Fi", &err.to_string()).await,
-            }
+            let _guard = WIFI_TOGGLE_LOCK.lock().await;
+            let _ = set_wifi_enabled(ctx, &nm, true).await;
             Ok(MenuActionResult::Exit)
         }
         MainAction::WifiOff => {
-            match nm.set_wireless_enabled(false).await {
-                Ok(()) => notify_info(ctx, "Wi-Fi disabled", "").await,
-                Err(err) => notify_err(ctx, "Failed to disable Wi-Fi", &err.to_string()).await,
-            }
+            let _guard = WIFI_TOGGLE_LOCK.lock().await;
+            let _ = set_wifi_enabled(ctx, &nm, false).await;
             Ok(MenuActionResult::Exit)
         }
         MainAction::Rescan => Ok(MenuActionResult::Rescan),
@@ -2407,13 +2478,7 @@ async fn copy_and_notify(ctx: &AppContext, value: &str, label: &str) {
 }
 
 async fn open_connection_editor(ctx: &AppContext) {
-    let mut cmd = std::process::Command::new("nm-connection-editor");
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-
-    if let Err(err) = cmd.spawn() {
+    if let Err(err) = spawn_reaped(Command::new("nm-connection-editor").process_group(0)) {
         warn!("Failed to launch nm-connection-editor: {err}");
         notify_err(
             ctx,

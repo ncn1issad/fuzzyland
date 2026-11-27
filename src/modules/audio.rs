@@ -1,16 +1,19 @@
-use crate::config::IconsConfig;
+use crate::config::{AudioConfig, IconsConfig};
 use crate::core::fuzzel::{self, Anchor, FuzzelOptions};
 use crate::core::hyprland;
 use crate::core::notify::{Notification, Urgency};
+use crate::core::process::spawn_reaped;
 use crate::daemon::menu::{MenuKind, MenuSession};
 use crate::daemon::AppContext;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use libpulse_binding::callbacks::ListResult;
 use libpulse_binding::context::{Context, FlagSet as ContextFlagSet, State as ContextState};
 use libpulse_binding::def::PortAvailable;
 use libpulse_binding::mainloop::standard::Mainloop;
 use libpulse_binding::operation::{Operation, State as OperationState};
 use libpulse_binding::time::MicroSeconds;
+use libpulse_binding::volume::{ChannelVolumes, Volume};
+use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -19,6 +22,7 @@ use std::process::Stdio;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
@@ -105,6 +109,20 @@ struct SourceOutputData {
     source: u32,
     app_id: Option<String>,
     node_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AudioTarget {
+    Output,
+    Input,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeviceAudioState {
+    index: u32,
+    volume: ChannelVolumes,
+    mute: bool,
 }
 
 /// Synchronous PulseAudio / PipeWire-Pulse client meant to run inside `spawn_blocking`.
@@ -362,6 +380,191 @@ impl PulseClient {
         let mut introspector = self.context.introspect();
         let op = introspector.move_source_output_by_name(index, source_name, None);
         self.wait_op(op)
+    }
+
+    fn ensure_ready(&self) -> Result<()> {
+        match self.context.get_state() {
+            ContextState::Ready => Ok(()),
+            state => Err(anyhow!(
+                "PulseAudio/PipeWire context is not ready (state: {state:?})"
+            )),
+        }
+    }
+
+    fn default_audio_state(&mut self, target: AudioTarget) -> Result<DeviceAudioState> {
+        let (default_sink, default_source) = self.default_sink_and_source()?;
+        match target {
+            AudioTarget::Output => {
+                if default_sink.is_empty() {
+                    return Err(anyhow!("No default audio output device found"));
+                }
+                self.sink_audio_state(&default_sink)
+            }
+            AudioTarget::Input => {
+                if default_source.is_empty() {
+                    return Err(anyhow!("No default audio input device found"));
+                }
+                self.source_audio_state(&default_source)
+            }
+        }
+    }
+
+    fn sink_audio_state(&mut self, sink_name: &str) -> Result<DeviceAudioState> {
+        self.ensure_ready()?;
+        if sink_name.contains('\0') {
+            return Err(anyhow!("Invalid sink name containing NUL byte"));
+        }
+        let state = Rc::new(Cell::new(None));
+        let failed = Rc::new(Cell::new(false));
+        let state_cb = Rc::clone(&state);
+        let failed_cb = Rc::clone(&failed);
+        let introspector = self.context.introspect();
+        let op = introspector.get_sink_info_by_name(sink_name, move |res| match res {
+            ListResult::Item(info) => {
+                state_cb.set(Some(DeviceAudioState {
+                    index: info.index,
+                    volume: info.volume,
+                    mute: info.mute,
+                }));
+            }
+            ListResult::End => {}
+            ListResult::Error => {
+                failed_cb.set(true);
+            }
+        });
+        self.wait_op(op)?;
+        if failed.get() {
+            return Err(anyhow!(
+                "PulseAudio/PipeWire failed to query default output '{sink_name}'"
+            ));
+        }
+        state
+            .get()
+            .ok_or_else(|| anyhow!("Default audio output '{sink_name}' was not found"))
+    }
+
+    fn source_audio_state(&mut self, source_name: &str) -> Result<DeviceAudioState> {
+        self.ensure_ready()?;
+        if source_name.contains('\0') {
+            return Err(anyhow!("Invalid source name containing NUL byte"));
+        }
+        let state = Rc::new(Cell::new(None));
+        let failed = Rc::new(Cell::new(false));
+        let state_cb = Rc::clone(&state);
+        let failed_cb = Rc::clone(&failed);
+        let introspector = self.context.introspect();
+        let op = introspector.get_source_info_by_name(source_name, move |res| match res {
+            ListResult::Item(info) => {
+                state_cb.set(Some(DeviceAudioState {
+                    index: info.index,
+                    volume: info.volume,
+                    mute: info.mute,
+                }));
+            }
+            ListResult::End => {}
+            ListResult::Error => {
+                failed_cb.set(true);
+            }
+        });
+        self.wait_op(op)?;
+        if failed.get() {
+            return Err(anyhow!(
+                "PulseAudio/PipeWire failed to query default input '{source_name}'"
+            ));
+        }
+        state
+            .get()
+            .ok_or_else(|| anyhow!("Default audio input '{source_name}' was not found"))
+    }
+
+    fn set_sink_volume(&mut self, index: u32, volume: &ChannelVolumes) -> Result<()> {
+        self.ensure_ready()?;
+        if !volume.is_valid() {
+            return Err(anyhow!("Refusing to apply invalid output channel volume"));
+        }
+        let ok = Rc::new(Cell::new(false));
+        let ok_cb = Rc::clone(&ok);
+        let mut introspector = self.context.introspect();
+        let op = introspector.set_sink_volume_by_index(
+            index,
+            volume,
+            Some(Box::new(move |success| {
+                ok_cb.set(success);
+            })),
+        );
+        self.wait_op(op)?;
+        if !ok.get() {
+            return Err(anyhow!(
+                "PulseAudio/PipeWire rejected volume update for sink {index}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_source_volume(&mut self, index: u32, volume: &ChannelVolumes) -> Result<()> {
+        self.ensure_ready()?;
+        if !volume.is_valid() {
+            return Err(anyhow!("Refusing to apply invalid input channel volume"));
+        }
+        let ok = Rc::new(Cell::new(false));
+        let ok_cb = Rc::clone(&ok);
+        let mut introspector = self.context.introspect();
+        let op = introspector.set_source_volume_by_index(
+            index,
+            volume,
+            Some(Box::new(move |success| {
+                ok_cb.set(success);
+            })),
+        );
+        self.wait_op(op)?;
+        if !ok.get() {
+            return Err(anyhow!(
+                "PulseAudio/PipeWire rejected volume update for source {index}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_sink_mute(&mut self, index: u32, mute: bool) -> Result<()> {
+        self.ensure_ready()?;
+        let ok = Rc::new(Cell::new(false));
+        let ok_cb = Rc::clone(&ok);
+        let mut introspector = self.context.introspect();
+        let op = introspector.set_sink_mute_by_index(
+            index,
+            mute,
+            Some(Box::new(move |success| {
+                ok_cb.set(success);
+            })),
+        );
+        self.wait_op(op)?;
+        if !ok.get() {
+            return Err(anyhow!(
+                "PulseAudio/PipeWire rejected mute update for sink {index}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_source_mute(&mut self, index: u32, mute: bool) -> Result<()> {
+        self.ensure_ready()?;
+        let ok = Rc::new(Cell::new(false));
+        let ok_cb = Rc::clone(&ok);
+        let mut introspector = self.context.introspect();
+        let op = introspector.set_source_mute_by_index(
+            index,
+            mute,
+            Some(Box::new(move |success| {
+                ok_cb.set(success);
+            })),
+        );
+        self.wait_op(op)?;
+        if !ok.get() {
+            return Err(anyhow!(
+                "PulseAudio/PipeWire rejected mute update for source {index}"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -863,23 +1066,16 @@ async fn start_easyeffects_service(ctx: &AppContext) -> bool {
         debug!("systemd1 StartUnit failed for {EASYEFFECTS_UNIT}: {res:?}");
     }
 
-    Command::new("easyeffects")
-        .args(["--service-mode", "--hide-window"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .is_ok()
+    spawn_reaped(
+        Command::new("easyeffects")
+            .args(["--service-mode", "--hide-window"])
+            .process_group(0),
+    )
+    .is_ok()
 }
 
 fn open_easyeffects_gui() {
-    let _ = Command::new("easyeffects")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn();
+    let _ = spawn_reaped(Command::new("easyeffects").process_group(0));
 }
 
 async fn run_easyeffects_cmd(args: &[&str], timeout: Duration) -> (bool, String, String) {
@@ -1840,6 +2036,111 @@ pub async fn toggle_mic_fx(ctx: &AppContext) -> Result<()> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Public API: Volume & mute controls
+// ---------------------------------------------------------------------------
+
+fn target_lock(target: AudioTarget) -> &'static Mutex<()> {
+    static OUTPUT_LOCK: Mutex<()> = Mutex::const_new(());
+    static INPUT_LOCK: Mutex<()> = Mutex::const_new(());
+    match target {
+        AudioTarget::Output => &OUTPUT_LOCK,
+        AudioTarget::Input => &INPUT_LOCK,
+    }
+}
+
+fn percent_to_volume(percent: u16) -> Volume {
+    let raw = (u64::from(percent) * u64::from(Volume::NORMAL.0) + 50) / 100;
+    Volume(raw.min(u64::from(Volume::MAX.0)) as u32)
+}
+
+fn delta_percent_to_raw(delta: i32) -> i64 {
+    let scaled = i64::from(delta) * i64::from(Volume::NORMAL.0);
+    if scaled >= 0 {
+        (scaled + 50) / 100
+    } else {
+        (scaled - 50) / 100
+    }
+}
+
+fn compute_adjusted_volume(
+    current: &ChannelVolumes,
+    delta: i32,
+    max_volume: u16,
+) -> Result<ChannelVolumes> {
+    let channel_count = current.len();
+    if channel_count == 0 || channel_count > ChannelVolumes::CHANNELS_MAX {
+        return Err(anyhow!(
+            "Audio device reported an invalid channel count ({channel_count})"
+        ));
+    }
+
+    let current_channels = current.get();
+    let old_peak = current_channels.iter().map(|v| v.0).max().unwrap_or(0);
+    let limit = percent_to_volume(max_volume).0;
+    let delta_raw = delta_percent_to_raw(delta);
+    let target_peak = (i64::from(old_peak) + delta_raw).clamp(0, i64::from(limit)) as u32;
+
+    let mut next = *current;
+    if target_peak == 0 {
+        for ch in next.get_mut() {
+            *ch = Volume::MUTED;
+        }
+    } else if old_peak == 0 {
+        let target = Volume(target_peak);
+        for ch in next.get_mut() {
+            *ch = target;
+        }
+    } else {
+        let old_peak_u128 = u128::from(old_peak);
+        let target_peak_u128 = u128::from(target_peak);
+        for ch in next.get_mut() {
+            let scaled = (u128::from(ch.0) * target_peak_u128 + old_peak_u128 / 2) / old_peak_u128;
+            ch.0 = scaled.min(target_peak_u128) as u32;
+        }
+    }
+
+    Ok(next)
+}
+
+pub async fn adjust_volume(target: AudioTarget, delta: i32, config: &AudioConfig) -> Result<()> {
+    let max_volume = config.max_volume;
+    let unmute_on_increase = config.unmute_on_volume_up && delta > 0;
+    let _guard = target_lock(target).lock().await;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut client = PulseClient::connect()?;
+        let state = client.default_audio_state(target)?;
+        let next_volume = compute_adjusted_volume(&state.volume, delta, max_volume)?;
+        match target {
+            AudioTarget::Output => {
+                client.set_sink_volume(state.index, &next_volume)?;
+                if unmute_on_increase && state.mute {
+                    client
+                        .set_sink_mute(state.index, false)
+                        .context("Volume adjusted, but the audio output could not be unmuted")?;
+                }
+                Ok(())
+            }
+            AudioTarget::Input => client.set_source_volume(state.index, &next_volume),
+        }
+    })
+    .await?
+}
+
+pub async fn toggle_mute(target: AudioTarget) -> Result<()> {
+    let _guard = target_lock(target).lock().await;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut client = PulseClient::connect()?;
+        let state = client.default_audio_state(target)?;
+        let next_mute = !state.mute;
+        match target {
+            AudioTarget::Output => client.set_sink_mute(state.index, next_mute),
+            AudioTarget::Input => client.set_source_mute(state.index, next_mute),
+        }
+    })
+    .await?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2131,5 +2432,144 @@ mod tests {
         assert_eq!(parse_ee_bool_flag("2\n"), Some(false));
         assert_eq!(parse_ee_bool_flag("0"), None);
         assert_eq!(parse_ee_bool_flag(""), None);
+    }
+
+    fn make_cvolume(values: &[u32]) -> ChannelVolumes {
+        let mut cv = ChannelVolumes::default();
+        cv.set_len(values.len() as u8);
+        for (slot, &val) in cv.get_mut().iter_mut().zip(values) {
+            *slot = Volume(val);
+        }
+        cv
+    }
+
+    #[test]
+    fn audio_target_serde_uses_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&AudioTarget::Output).unwrap(),
+            "\"output\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AudioTarget::Input).unwrap(),
+            "\"input\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AudioTarget>("\"output\"").unwrap(),
+            AudioTarget::Output
+        );
+        assert_eq!(
+            serde_json::from_str::<AudioTarget>("\"input\"").unwrap(),
+            AudioTarget::Input
+        );
+    }
+
+    #[test]
+    fn volume_math_applies_relative_steps_and_preserves_channel_balance() {
+        let half = Volume::NORMAL.0 / 2;
+        let quarter = Volume::NORMAL.0 / 4;
+        let unbalanced = make_cvolume(&[half, quarter]);
+
+        let raised = compute_adjusted_volume(&unbalanced, 10, 100).unwrap();
+        let expected_left = half + 6554;
+        assert_eq!(
+            raised.get(),
+            &[Volume(expected_left), Volume(expected_left / 2)]
+        );
+
+        let restored = compute_adjusted_volume(&raised, -10, 100).unwrap();
+        assert_eq!(restored.get(), &[Volume(half), Volume(quarter)]);
+
+        // Multi-channel balance (including a muted channel) scales proportionally.
+        let surround = make_cvolume(&[Volume::NORMAL.0, half, quarter, 0]);
+        let halved = compute_adjusted_volume(&surround, -50, 100).unwrap();
+        assert_eq!(
+            halved.get(),
+            &[
+                Volume(half),
+                Volume(quarter),
+                Volume(quarter / 2),
+                Volume(0)
+            ]
+        );
+
+        // Raising from all-zero lifts all channels uniformly.
+        let zeroed = make_cvolume(&[0, 0]);
+        let lifted = compute_adjusted_volume(&zeroed, 5, 100).unwrap();
+        assert_eq!(lifted.get(), &[Volume(3277), Volume(3277)]);
+    }
+
+    #[test]
+    fn volume_math_respects_peak_limit_without_distorting_balance() {
+        // Peak at 95%, right at 47.5%; +10% hits 100% cap while preserving 2:1 ratio.
+        let near_cap = make_cvolume(&[62259, 31130]);
+        let capped = compute_adjusted_volume(&near_cap, 10, 100).unwrap();
+        assert_eq!(capped.get()[0], Volume::NORMAL);
+        assert!((i64::from(capped.get()[1].0) - i64::from(Volume::NORMAL.0 / 2)).abs() <= 1);
+
+        // Configurable boost above 100% (e.g. 150%) is respected.
+        let boost_limit = percent_to_volume(150);
+        assert_eq!(boost_limit.0, 98304);
+        let stereo = make_cvolume(&[Volume::NORMAL.0, Volume::NORMAL.0 / 2]);
+        let boosted = compute_adjusted_volume(&stereo, 60, 150).unwrap();
+        assert_eq!(boosted.get(), &[Volume(98304), Volume(49152)]);
+
+        // Existing volume above the configured peak limit is clamped back down proportionally.
+        let over_limit = make_cvolume(&[98304, 49152]);
+        let clamped_up = compute_adjusted_volume(&over_limit, 5, 100).unwrap();
+        assert_eq!(
+            clamped_up.get(),
+            &[Volume::NORMAL, Volume(Volume::NORMAL.0 / 2)]
+        );
+        let clamped_zero = compute_adjusted_volume(&over_limit, 0, 100).unwrap();
+        assert_eq!(
+            clamped_zero.get(),
+            &[Volume::NORMAL, Volume(Volume::NORMAL.0 / 2)]
+        );
+        let reduced_below_cap = compute_adjusted_volume(&over_limit, -60, 100).unwrap();
+        assert_eq!(reduced_below_cap.get()[0].0, 98304 - 39322);
+        assert_eq!(reduced_below_cap.get()[1].0, (98304 - 39322) / 2);
+
+        // Zero max_volume clamps everything cleanly to muted.
+        let zero_cap = compute_adjusted_volume(&stereo, 10, 0).unwrap();
+        assert_eq!(zero_cap.get(), &[Volume::MUTED, Volume::MUTED]);
+    }
+
+    #[test]
+    fn volume_math_handles_extreme_signed_deltas_and_clamps_without_overflow() {
+        let stereo = make_cvolume(&[Volume::NORMAL.0 / 2, Volume::NORMAL.0 / 4]);
+
+        let max_delta = compute_adjusted_volume(&stereo, i32::MAX, 100).unwrap();
+        assert!(max_delta.is_valid());
+        assert_eq!(
+            max_delta.get(),
+            &[Volume::NORMAL, Volume(Volume::NORMAL.0 / 2)]
+        );
+
+        let min_delta = compute_adjusted_volume(&stereo, i32::MIN, 100).unwrap();
+        assert!(min_delta.is_valid());
+        assert_eq!(min_delta.get(), &[Volume::MUTED, Volume::MUTED]);
+
+        let max_limit = compute_adjusted_volume(&stereo, i32::MAX, u16::MAX).unwrap();
+        assert!(max_limit.is_valid());
+        assert_eq!(max_limit.get()[0], percent_to_volume(u16::MAX));
+        assert!(max_limit.get()[0] <= Volume::MAX);
+
+        let min_with_max_limit = compute_adjusted_volume(&stereo, i32::MIN, u16::MAX).unwrap();
+        assert!(min_with_max_limit.is_valid());
+        assert_eq!(min_with_max_limit.get(), &[Volume::MUTED, Volume::MUTED]);
+
+        // Zero delta within limit is an exact identity.
+        let unchanged = compute_adjusted_volume(&stereo, 0, 100).unwrap();
+        assert_eq!(unchanged.get(), stereo.get());
+
+        // Decreasing past 0 clamps cleanly to muted.
+        let floor = compute_adjusted_volume(&make_cvolume(&[3277, 1638]), -10, 100).unwrap();
+        assert_eq!(floor.get(), &[Volume::MUTED, Volume::MUTED]);
+    }
+
+    #[test]
+    fn volume_math_rejects_empty_channel_volumes() {
+        let empty = ChannelVolumes::default();
+        assert!(compute_adjusted_volume(&empty, 5, 100).is_err());
     }
 }

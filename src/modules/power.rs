@@ -2,13 +2,13 @@ use crate::config::{expand_tilde, IconsConfig, PowerConfig};
 use crate::core::fuzzel::{self, Anchor, FuzzelOptions};
 use crate::core::hyprland;
 use crate::core::notify::{Notification, Urgency};
+use crate::core::process::spawn_reaped;
 use crate::daemon::menu::{MenuKind, MenuSession};
 use crate::daemon::AppContext;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::RwLock;
 use std::time::SystemTime;
 use tokio::process::Command;
@@ -253,11 +253,7 @@ fn needs_confirmation(label: &str, confirm_list: &[String]) -> bool {
 
 fn spawn_detached_shell(command: &str) -> Result<()> {
     let mut std_cmd = std::process::Command::new("/bin/sh");
-    std_cmd
-        .args(["-c", command])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    std_cmd.args(["-c", command]);
 
     // SAFETY: `setsid()` is async-signal-safe and detaches the child into its own session.
     unsafe {
@@ -269,16 +265,8 @@ fn spawn_detached_shell(command: &str) -> Result<()> {
         });
     }
 
-    let mut child = Command::from(std_cmd)
-        .spawn()
-        .with_context(|| format!("Failed to spawn power command '{command}'"))?;
-
-    // Reap the detached child asynchronously so the persistent daemon leaves no zombies.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-
-    Ok(())
+    spawn_reaped(&mut Command::from(std_cmd))
+        .with_context(|| format!("Failed to spawn power command '{command}'"))
 }
 
 pub async fn run_menu(ctx: &AppContext) -> Result<()> {
