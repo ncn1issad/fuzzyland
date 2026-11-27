@@ -32,7 +32,8 @@
     "format-wifi": "󰤨  {essid}",
     "format-ethernet": "󰈀  {ifname}",
     "format-disconnected": "󰤭  Offline",
-    "on-click": "fuzzyland network"
+    "on-click": "fuzzyland network",
+    "on-click-right": "fuzzyland network --toggle-wifi"
   },
 
   "bluetooth": {
@@ -51,7 +52,9 @@
     },
     "on-click": "fuzzyland audio output",
     "on-click-middle": "fuzzyland audio output --toggle-eq",
-    "on-click-right": "fuzzyland audio input"
+    "on-click-right": "fuzzyland audio input",
+    "on-scroll-up": "fuzzyland audio output --volume +5",
+    "on-scroll-down": "fuzzyland audio output --volume -5"
   },
 
   "custom/clipboard": {

@@ -19,12 +19,12 @@ Provides interactive Fuzzel menus, streaming Waybar status widgets, and desktop 
 | **Bluetooth** | `org.bluez` (`zbus` + embedded `Agent1`) + `/dev/rfkill` | `wl-copy` |
 | **Battery & Power Profiles** | `org.freedesktop.UPower` + `PowerProfiles` (`zbus`) | None |
 | **Audio Output & Input** | `libpulse-binding` (`pipewire-pulse` / PulseAudio) + `systemd1` (`zbus`) | `easyeffects` *(when installed)* |
-| **External Backlight** | Linux `/dev/i2c-*` DDC/CI (VCP `0x10`) + `/sys/class/drm` EDID + Hyprland `socket2` | None |
+| **Backlight** | External monitors via DDC/CI, built-in displays via logind and `/sys/class/backlight` | None |
 | **Power / Session** | Live-cached `wlogout` layout (`~/.config/wlogout/layout`) | `wlogout` layout actions *(optional)* |
 | **Hyprland IPC** | Direct Unix sockets (`.socket.sock` & `.socket2.sock`) | None |
 | **Notifications** | `org.freedesktop.Notifications` (`zbus`) | None |
 | **Media** | `org.mpris.MediaPlayer2.*` (`zbus`) | None |
-| **Clipboard** | `MenuCoordinator` + Hyprland cursor output | `cliphist`, `wl-copy` |
+| **Clipboard** | `MenuCoordinator` + Hyprland cursor output | `cliphist`, `wl-copy`, `wl-paste` (history collection) |
 | **Screenshots** | Hyprland IPC + native PNG IHDR parser + D-Bus thumbnail notify | `grim`, `slurp`, `wl-copy` |
 | **Menu UI** | Managed by `MenuCoordinator` | `fuzzel` |
 
@@ -52,7 +52,15 @@ systemctl --user daemon-reload
 systemctl --user enable --now fuzzyland.service
 ```
 
-Or start directly from `hyprland.conf`:
+Or start it from `hyprland.lua`:
+
+```lua
+hl.on("hyprland.start", function()
+  hl.dispatch(hl.dsp.exec_cmd("fuzzyland daemon"))
+end)
+```
+
+For older Hyprland versions that use `hyprland.conf`:
 
 ```ini
 exec-once = fuzzyland daemon
@@ -63,19 +71,23 @@ exec-once = fuzzyland daemon
 ```text
 fuzzyland
 ├── daemon                          Run the persistent background daemon
-├── network                         Open Wi-Fi / Ethernet / VPN / Hotspot menu
+├── network [--toggle-wifi]         Open Network menu, or toggle Wi-Fi
 ├── bluetooth [--toggle-power]      Open Bluetooth menu, or toggle adapter power
 ├── battery
 │   ├── status [--once]             Stream Waybar JSON (or single snapshot with --once)
 │   ├── menu                        Open Power Profile menu
 │   └── profile <name>              Set power profile directly
 ├── audio
-│   ├── output [--toggle-eq]        Open Output & EasyEffects EQ menu, or toggle EQ bypass
-│   └── input  [--toggle-fx]        Open Input & Mic FX menu, or toggle FX bypass
+│   ├── output [ACTION]             Open Output & EQ menu, or use --toggle-eq, --toggle-mute, --volume <DELTA>
+│   └── input  [ACTION]             Open Input & Mic FX menu, or use --toggle-fx, --toggle-mute, --volume <DELTA>
 ├── backlight
 │   ├── status [--once]             Stream Waybar JSON for DDC/CI external monitors
 │   ├── adjust <DELTA>              Adjust external monitor brightness (e.g. +5, -5)
-│   └── refresh                     Force re-probe of external monitors
+│   ├── refresh                     Force re-probe of external monitors
+│   └── internal [--device <NAME>]
+│       ├── adjust <DELTA>          Adjust built-in display brightness (e.g. +5, -5)
+│       ├── dim [--percent <PCT>]   Dim the display and save its previous brightness (default 10%)
+│       └── restore                 Restore the brightness saved by dim
 ├── power                           Open Session / Power menu
 ├── clipboard [--clear]             Open Clipboard History menu, or confirm-clear
 ├── screenshot [MODE] [FLAGS]       MODE: menu|region|window|active-window|monitor|all
@@ -100,6 +112,10 @@ subtext = ""
 muted = ""
 separator = ""
 
+[audio]
+max_volume = 100 # Percent of normal volume, for both input and output adjustments.
+unmute_on_volume_up = false # Set to true to unmute the output when raising its volume.
+
 [battery]
 warning_threshold = 25
 critical_threshold = 10
@@ -109,6 +125,9 @@ debounce_ms = 120
 poll_interval_secs = 30
 i2c_settle_ms = 40
 internal_prefixes = ["eDP-", "LVDS-", "DSI-"]
+
+[clipboard]
+watch = false
 
 [power]
 confirm = ["logout", "reboot", "shutdown"]
@@ -130,6 +149,8 @@ max_track_len = 44
 ```
 
 See [examples/catppuccin-mocha.toml](examples/catppuccin-mocha.toml) for a drop-in Catppuccin Mocha preset.
+
+Set `watch = true` under `[clipboard]` and restart `fuzzyland daemon` to collect text and image history automatically. This uses `wl-paste` and `cliphist`. If you enable it, remove any existing `wl-paste --watch cliphist store` autostart entries and stop those watchers to avoid duplicate collection. The daemon needs the Wayland session environment, including `WAYLAND_DISPLAY`.
 
 ## Waybar, Hyprland & Hyprlock Integration
 
@@ -154,13 +175,39 @@ See [examples/waybar-config.jsonc](examples/waybar-config.jsonc). Both `custom/b
 
 ### Hyprland Keybinds
 
+For `hyprland.lua`:
+
+```lua
+hl.bind("SUPER + V", hl.dsp.exec_cmd("fuzzyland clipboard"))
+hl.bind("SUPER + SHIFT + V", hl.dsp.exec_cmd("fuzzyland clipboard --clear"))
+hl.bind("Print", hl.dsp.exec_cmd("fuzzyland screenshot"))
+hl.bind("SHIFT + Print", hl.dsp.exec_cmd("fuzzyland screenshot region"))
+hl.bind("SUPER + Print", hl.dsp.exec_cmd("fuzzyland screenshot active-window --save"))
+hl.bind("XF86AudioRaiseVolume", hl.dsp.exec_cmd("fuzzyland audio output --volume +5"), { repeating = true })
+hl.bind("XF86AudioLowerVolume", hl.dsp.exec_cmd("fuzzyland audio output --volume -5"), { repeating = true })
+hl.bind("XF86AudioMute", hl.dsp.exec_cmd("fuzzyland audio output --toggle-mute"))
+hl.bind("XF86AudioMicMute", hl.dsp.exec_cmd("fuzzyland audio input --toggle-mute"))
+hl.bind("XF86MonBrightnessUp", hl.dsp.exec_cmd("fuzzyland backlight internal adjust +5"), { repeating = true })
+hl.bind("XF86MonBrightnessDown", hl.dsp.exec_cmd("fuzzyland backlight internal adjust -5"), { repeating = true })
+```
+
+For `hyprland.conf`:
+
 ```ini
 bind = SUPER, V, exec, fuzzyland clipboard
 bind = SUPER SHIFT, V, exec, fuzzyland clipboard --clear
 bind = , Print, exec, fuzzyland screenshot
 bind = SHIFT, Print, exec, fuzzyland screenshot region
 bind = SUPER, Print, exec, fuzzyland screenshot active-window --save
+binde = , XF86AudioRaiseVolume, exec, fuzzyland audio output --volume +5
+binde = , XF86AudioLowerVolume, exec, fuzzyland audio output --volume -5
+bind = , XF86AudioMute, exec, fuzzyland audio output --toggle-mute
+bind = , XF86AudioMicMute, exec, fuzzyland audio input --toggle-mute
+binde = , XF86MonBrightnessUp, exec, fuzzyland backlight internal adjust +5
+binde = , XF86MonBrightnessDown, exec, fuzzyland backlight internal adjust -5
 ```
+
+For idle dimming, put `fuzzyland backlight internal dim` in your Hypridle listener's `on-timeout` and `fuzzyland backlight internal restore` in its `on-resume`. To select a specific backlight, pass the same `--device <NAME>` to both commands.
 
 ### Hyprlock Media Widgets
 
